@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from borochid.common import images
-from borochid.common.manifest import Manifest, display_name
+from borochid.common.manifest import Manifest, display_name, state_key
 from borochid.common.models import DeviceIdentity, DeviceStatus
 from borochid.service import plugins
 from borochid.service.channels import Channel, ChannelNotReady, NullChannel
@@ -29,6 +29,9 @@ from borochid.service.drivers import Driver
 from borochid.service.drivers.loader import DriverUnavailable, driver_class
 from borochid.service.host import Host
 from borochid.service.host.audio import HostAudio
+from borochid.service.host.input import HostInput
+from borochid.service.host.power import HostPower
+from borochid.service.profiles import ProfileStore
 from borochid.service.registry.client import Candidate, Registry
 from borochid.service.registry.trust import TrustError
 from borochid.service.settings import SettingsStore
@@ -82,6 +85,8 @@ class Device:
             "status": str(self.status),
             "status_text": self.status_text(),
             "battery": self.battery(),
+            # Follows the service-wide profiles (profiles.list).
+            "profiles": bool(self.driver and self.driver.supports_profiles and self.status is DeviceStatus.READY),
             "available": self.available(),
             "error": self.error,
             "needs": self.needs,
@@ -103,7 +108,7 @@ class Device:
         if self.status is not DeviceStatus.READY or not spec or not self.driver:
             return None
         value = self.driver.state.get(spec["state"])
-        key = str(value).lower() if isinstance(value, bool) or value is None else str(value)
+        key = state_key(value)
         return spec.get("map", {}).get(key, None if value is None else str(value))
 
     def state(self) -> dict[str, Any]:
@@ -174,6 +179,8 @@ class DeviceManager:
         self.cache_dir = registry.cfg.cache_dir
         self.image_store = registry.cfg.cache_dir / "images"
         self.devices: dict[str, Device] = {}
+        self.profiles = ProfileStore(self.data_dir / "profiles.json", self._profiles_changed)
+        self._profile_task: asyncio.Task | None = None
 
     # -- DeviceSink ------------------------------------------------------------
 
@@ -313,13 +320,19 @@ class DeviceManager:
             if summary_keys & changes.keys() and dev.status is DeviceStatus.READY:
                 self.emit("device.changed", dev.summary())
 
-        host = Host(audio=self._audio_service(manifest, ident, publish))
+        host = Host(
+            audio=self._audio_service(manifest, ident, publish),
+            power=self._power_service(manifest, ident, publish),
+            input=HostInput() if "input" in manifest.raw else None,
+        )
         driver = cls(manifest, dev.package_dir, channel, publish, SettingsStore(self.data_dir, manifest.id, ident), host)
         channel.on_data = driver.on_data
         channel.on_closed = lambda exc: self._on_channel_closed(dev, exc)
         dev.channel, dev.driver, dev.host = channel, driver, host
         await channel.open()
         await host.start()
+        if driver.supports_profiles:
+            await driver.use_profile(self.profiles.current, self.profiles.ids)
         await driver.start()
 
     @staticmethod
@@ -337,6 +350,12 @@ class DeviceManager:
             publish,
             self.cache_dir / "tones",
         )
+
+    @staticmethod
+    def _power_service(manifest: Manifest, ident: DeviceIdentity, publish) -> HostPower | None:
+        if "power_supply" not in manifest.raw or not (sys_path := ident.attrs.get("sys_path")):
+            return None
+        return HostPower(Path(sys_path), publish)
 
     def _on_channel_closed(self, dev: Device, exc: Exception | None) -> None:
         if self.devices.get(dev.ident.uid) is not dev:
@@ -371,6 +390,28 @@ class DeviceManager:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         await self._close_io(dev)
+
+    # -- profiles ----------------------------------------------------------------
+
+    def _profiles_changed(self) -> None:
+        self.emit("profiles.changed", self.profiles.snapshot())
+        # One switch at a time, in order: a quick A -> B -> A must end on A.
+        previous = self._profile_task
+        self._profile_task = asyncio.get_running_loop().create_task(self._apply_profiles(previous))
+
+    async def _apply_profiles(self, previous: asyncio.Task | None) -> None:
+        if previous is not None:
+            with contextlib.suppress(Exception):
+                await previous
+        profile, known = self.profiles.current, self.profiles.ids
+        for dev in list(self.devices.values()):
+            driver = dev.driver
+            if driver is None or not driver.supports_profiles or dev.status is not DeviceStatus.READY:
+                continue
+            try:
+                await driver.use_profile(profile, known)
+            except Exception:
+                log.exception("%s: switching to profile %r failed", dev.ident.uid, profile.name)
 
     # -- operations exposed over RPC -------------------------------------------
 

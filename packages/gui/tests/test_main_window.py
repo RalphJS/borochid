@@ -34,6 +34,7 @@ class FakeClient(QObject):
         self.devices = {d["uid"]: d for d in devices}
         self.calls = []
         self.image_store = None
+        self.profiles = {"profiles": [{"id": "default", "name": "Default"}, {"id": "p1", "name": "Games"}], "active": "default"}
 
     def call(self, method, params=None, callback=None):
         self.calls.append((method, params))
@@ -41,6 +42,8 @@ class FakeClient(QObject):
             "service.info": lambda: {"protocol": PROTOCOL_VERSION, "version": "test", "image_store": self.image_store},
             "devices.list": lambda: list(self.devices.values()),
             "device.get": lambda: {**self.devices[params["uid"]], "ui": UI, "state": {"brightness": 7, "battery": 80}},
+            "profiles.list": lambda: self.profiles,
+            "profiles.select": lambda: {**self.profiles, "active": params["id"]},
         }.get(method, lambda: {})()
         if callback:
             callback(result, None)
@@ -335,3 +338,48 @@ def test_the_edit_button_has_its_own_row_under_the_picture(app):
     assert edit.top() > picture.bottom()  # never overlaps the picture
     assert edit.right() == option.rect.right() - TileDelegate.PAD
     assert picture.height() == TileDelegate.PICTURE  # the picture keeps its full size
+
+
+def test_profile_switcher_shows_only_with_a_device_that_supports_profiles(app):
+    client = FakeClient([summary("usb:1", "Acme Macropad", profiles=False)])
+    win = MainWindow(client)
+    win.show()
+    client.connected.emit()
+    assert not win.profile_selector.isVisible()
+
+    mouse = summary("usb:2", "Zeta Mouse", profiles=True)
+    client.devices[mouse["uid"]] = mouse
+    client.notification.emit("device.added", mouse)
+    assert win.profile_selector.isVisible()
+    combo = win.profile_selector.combo
+    assert [combo.itemText(i) for i in range(combo.count())] == ["Default", "Games"]
+
+    combo.activated.emit(1)
+    assert ("profiles.select", {"id": "p1"}) in client.calls and combo.currentText() == "Games"
+
+    # Another client switched: every window follows.
+    client.notification.emit("profiles.changed", {**client.profiles, "active": "default"})
+    assert combo.currentText() == "Default"
+
+    win._open("usb:2")  # the same switcher stays at the top of the device page
+    assert win.profile_selector.isVisible() and win.back.isVisible()
+    assert not any(b.isVisible() for b in win.home_actions)
+
+    client.notification.emit("device.removed", {"uid": "usb:2"})
+    assert not win.profile_selector.isVisible()
+
+
+def test_profile_switcher_hides_on_pages_of_devices_without_profiles(app):
+    client = FakeClient([summary("usb:1", "Corsair Virtuoso SE", profiles=False), summary("usb:2", "Zeta Mouse", profiles=True)])
+    win = MainWindow(client)
+    win.show()
+    client.connected.emit()
+    assert win.profile_selector.isVisible()  # home: the mouse has profiles
+
+    win._open("usb:1")
+    assert not win.profile_selector.isVisible()  # the headset isn't affected
+    win._go_home()
+    win._open("usb:2")
+    assert win.profile_selector.isVisible()
+    win._go_home()
+    assert win.profile_selector.isVisible()

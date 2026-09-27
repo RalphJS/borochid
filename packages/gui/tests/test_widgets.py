@@ -136,3 +136,126 @@ def test_compound_widgets_keep_their_parts_together_in_a_wide_form(app):
     swatch, picker = form.findChild(QtWidgets.QPushButton), form.findChild(QtWidgets.QToolButton)
     assert picker.x() - (swatch.x() + swatch.width()) < 16
     form.close()
+
+
+def test_enabled_if_can_be_negated(app):
+    ctx = PanelContext(lambda *_: None)
+    form = build_form([{"widget": "button", "text": "Go", "action": "go", "enabled_if": "!busy"}], ctx)
+    button = form.findChild(QtWidgets.QPushButton)
+    assert button.isEnabled()
+    ctx.apply({"busy": True})
+    assert not button.isEnabled()
+
+
+CATEGORIES = [
+    {"label": "Shortcut", "kind": "keys"},
+    {"label": "Mouse", "options": [{"value": {"button": 1}, "label": "Left click"}, {"value": {"button": 4}, "label": "Back"}]},
+    {"label": "DPI", "options": [{"value": "dpi_up", "label": "DPI up"}]},
+    {"label": "Nothing", "options": [{"value": "disabled", "label": "Do nothing"}]},
+]
+
+
+def key_event(scancode, press=True, key=0):
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    kind = QEvent.Type.KeyPress if press else QEvent.Type.KeyRelease
+    return QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier, scancode, 0, 0, "")
+
+
+def test_buttons_list_spells_out_each_binding(app):
+    from borochid.gui.binding_editor import describe
+
+    ctx = PanelContext(lambda *_: None)
+    form = build_form(
+        [{"widget": "buttons", "action": "set_binding", "buttons": [{"id": "g4", "label": "G4 (back)"}, {"id": "g8", "label": "G8"}], "categories": CATEGORIES}],
+        ctx,
+    )
+    ctx.apply({"bind.g4": {"keys": ["KEY_LEFTMETA", "KEY_V"]}, "bind.g8": "dpi_up"})
+    texts = [b.text() for b in form.findChildren(QtWidgets.QPushButton)]
+    assert "Super+V" in texts and "DPI up" in texts
+    assert describe({"button": 4}, CATEGORIES) == "Back"
+
+
+def test_recorder_records_a_combination_by_physical_key(app):
+    from borochid.gui.binding_editor import ShortcutRecorder
+
+    rec = ShortcutRecorder()
+    rec.start()
+    # Super (evdev 125) held, then "4" (evdev 5): XKB codes are evdev + 8.
+    rec.keyPressEvent(key_event(125 + 8))
+    rec.keyPressEvent(key_event(42 + 8))  # Shift
+    assert rec.chord() == []  # modifiers alone aren't a shortcut
+    rec.keyPressEvent(key_event(5 + 8))
+    assert rec.chord() == ["KEY_LEFTSHIFT", "KEY_LEFTMETA", "KEY_4"] and not rec.recording
+    rec.releaseKeyboard()
+
+
+def test_recorder_modifier_buttons_cover_shortcuts_the_desktop_keeps(app):
+    from borochid.gui.binding_editor import ShortcutRecorder
+
+    rec = ShortcutRecorder()
+    rec.start()
+    rec.keyPressEvent(key_event(47 + 8))  # "V"; the desktop swallowed Super
+    rec.toggles["KEY_LEFTMETA"].setChecked(True)
+    assert rec.chord() == ["KEY_LEFTMETA", "KEY_V"]
+
+
+def test_recorder_ignores_keys_a_button_may_not_send(app):
+    from borochid.gui.binding_editor import ShortcutRecorder
+
+    rec = ShortcutRecorder()
+    rec.start()
+    rec.keyPressEvent(key_event(116 + 8))  # KEY_POWER
+    assert rec.chord() == [] and rec.recording
+    rec.stop()
+
+
+def test_binding_dialog_opens_on_the_current_choice(app):
+    from borochid.gui.binding_editor import BindingDialog
+
+    dlg = BindingDialog(None, "G4", CATEGORIES, {"button": 4}, can_reset=True)
+    assert dlg.nav.currentRow() == 1 and dlg.selected() == {"button": 4}
+    dlg.nav.setCurrentRow(3)
+    dlg.pages.currentWidget().setCurrentRow(0)
+    assert dlg.selected() == "disabled"
+    keys = BindingDialog(None, "G5", CATEGORIES, {"keys": ["KEY_LEFTCTRL", "KEY_C"]}, can_reset=False)
+    assert keys.nav.currentRow() == 0 and keys.selected() == {"keys": ["KEY_LEFTCTRL", "KEY_C"]}
+
+
+def test_stages_widget(app):
+    sent = []
+    ctx = PanelContext(lambda action, params: sent.append((action, params)))
+    form = build_form(
+        [{"widget": "stages", "state": "stages", "current": "stage", "default": "default_stage", "min": 100, "max": 25600, "step": 50,
+          "set": "set_stage", "add": "add_stage", "remove": "remove_stage", "make_default": "set_default_stage", "select": "select_stage"}],
+        ctx,
+    )
+    ctx.apply({"stages": [800, 1600, 3200], "stage": 2, "default_stage": 2})
+    spins = form.findChildren(QtWidgets.QSpinBox)
+    assert [s.value() for s in spins] == [800, 1600, 3200]
+    stars = [b.text() for b in form.findChildren(QtWidgets.QToolButton) if b.text() in "★☆"]
+    assert stars == ["☆", "★", "☆"]
+    spins[0].setValue(900)
+    spins[0].editingFinished.emit()
+    assert sent == [("set_stage", {"stage": 1, "value": 900})]
+
+
+
+def test_readout_maps_null(app):
+    ctx = PanelContext(lambda *_: None)
+    form = build_form([{"widget": "readout", "label": "Input", "state": "err", "map": {"null": "Ready"}}], ctx)
+    ctx.apply({"err": None})
+    assert "Ready" in [w.text() for w in form.findChildren(QtWidgets.QLabel)]
+
+
+def test_keys_the_desktop_keeps_can_be_chosen_from_the_menu(app):
+    from borochid.gui.binding_editor import ShortcutRecorder
+
+    rec = ShortcutRecorder()
+    menu = rec.choose_button.menu()
+    system = next(a.menu() for a in menu.actions() if a.text() == "System")
+    print_screen = next(a for a in system.actions() if a.text() == "Print")
+    rec.toggles["KEY_LEFTMETA"].setChecked(True)
+    print_screen.trigger()
+    assert rec.chord() == ["KEY_LEFTMETA", "KEY_SYSRQ"]

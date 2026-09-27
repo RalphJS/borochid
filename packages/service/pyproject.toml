@@ -18,7 +18,8 @@ serial = ["pyserial>=3.5"]
 libusb = ["pyusb>=1.2"]
 ble = ["bleak>=0.22"]
 signing = ["cryptography>=42"]
-all = ["borochid-service[serial,libusb,ble,signing]"]
+input = ["evdev>=1.6"]
+all = ["borochid-service[serial,libusb,ble,signing,input]"]
 
 [project.scripts]
 borochid-service = "borochid.service.__main__:main"

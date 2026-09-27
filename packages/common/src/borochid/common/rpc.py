@@ -12,7 +12,7 @@ from typing import Any
 # Bump when methods/notifications change incompatibly. The service and GUI ship
 # as separate distributions, so they check this on connect instead of assuming
 # they were installed together.
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2  # 2: service-wide profiles (profiles.*)
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600

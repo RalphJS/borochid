@@ -15,6 +15,7 @@ from typing import Any
 from borochid.service import __version__
 from borochid.common import rpc
 from borochid.service.devices import DeviceManager
+from borochid.service.profiles import ProfileError
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +128,31 @@ class RpcServer:
     async def rpc_device_retry(self, uid: str | None = None) -> dict[str, int]:
         """Called by clients after installing a driver package."""
         return {"retried": self.manager.retry(uid)}
+
+    # Profiles shared by every device that supports them (service/profiles.py).
+    # Each returns the new state; clients also get a profiles.changed notification.
+
+    def _profiles(self, fn) -> dict[str, Any]:
+        try:
+            fn(self.manager.profiles)
+        except ProfileError as e:
+            raise rpc.RpcError(rpc.INVALID_PARAMS, str(e)) from None
+        return self.manager.profiles.snapshot()
+
+    async def rpc_profiles_list(self) -> dict[str, Any]:
+        return self.manager.profiles.snapshot()
+
+    async def rpc_profiles_select(self, id: str) -> dict[str, Any]:  # noqa: A002 (JSON-RPC param name)
+        return self._profiles(lambda p: p.select(id))
+
+    async def rpc_profiles_add(self, name: str, duplicate: bool = False) -> dict[str, Any]:
+        return self._profiles(lambda p: p.add(name, bool(duplicate)))
+
+    async def rpc_profiles_rename(self, id: str, name: str) -> dict[str, Any]:  # noqa: A002
+        return self._profiles(lambda p: p.rename(id, name))
+
+    async def rpc_profiles_remove(self, id: str) -> dict[str, Any]:  # noqa: A002
+        return self._profiles(lambda p: p.remove(id))
 
     async def rpc_bluetooth_scan(self, seconds: float = 30) -> dict[str, float]:
         """Bounded, user-requested discovery; the service never scans on its own."""
