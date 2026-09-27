@@ -22,6 +22,7 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
+from borochid.common import images
 from borochid.common.manifest import Manifest, ManifestError, shard_key_for_rule
 from borochid.service.registry.trust import sha256_hex
 
@@ -51,6 +52,20 @@ def package_files(pkg_dir: Path) -> list[Path]:
             raise ManifestError(f"{rel}: packages are data only (allowed: {sorted(_ALLOWED_SUFFIXES)})")
         files.append(f)
     return files
+
+
+def check_images(pkg_dir: Path, manifest: Manifest) -> None:
+    """Every PNG in the package must be a valid device image, and every image
+    the manifest names must exist, so a bad picture is caught before signing."""
+    for f in package_files(pkg_dir):
+        if f.suffix.lower() == ".png":
+            try:
+                images.check_png(f.read_bytes())
+            except images.ImageError as e:
+                raise ManifestError(f"{f.relative_to(pkg_dir)}: {e}") from None
+    for rel in {manifest.image, *(r.image for r in manifest.match)} - {None}:
+        if not (pkg_dir / rel).is_file():
+            raise ManifestError(f"image {rel} is missing from the package")
 
 
 def build_archive(pkg_dir: Path) -> bytes:
@@ -95,7 +110,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             m = Manifest.load(d)
             for rule in m.match:
                 shard_key_for_rule(rule)
-            package_files(d)
+            check_images(d, m)
             print(f"ok   {m.id} {m.version} (driver {m.driver.type})")
         except (ManifestError, OSError) as e:
             ok = False
@@ -110,6 +125,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     for d in find_packages(args.sources):
         m = Manifest.load(d)
+        check_images(d, m)
         data = build_archive(d)
         rel = f"packages/{m.id}/{m.version}.zip"
         (out / rel).parent.mkdir(parents=True, exist_ok=True)

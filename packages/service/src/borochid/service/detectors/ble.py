@@ -7,7 +7,7 @@ connects or disconnects. Between signals the process sleeps.
 
 Continuous discovery costs radio time and wakes the process for every
 advertisement nearby, so it only runs on request: ``scan(seconds)`` runs a
-bounded LE discovery (the GUI's "Scan Bluetooth"), reports what it finds, and
+bounded LE discovery (the ``bluetooth.scan`` RPC), reports what it finds, and
 forgets unpaired finds when it ends. Desktop Bluetooth settings behave the
 same way.
 """

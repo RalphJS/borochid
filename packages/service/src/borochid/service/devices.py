@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from borochid.common import images
 from borochid.common.manifest import Manifest, display_name
 from borochid.common.models import DeviceIdentity, DeviceStatus
 from borochid.service import plugins
@@ -49,6 +50,7 @@ class Device:
     candidate: Candidate | None = None
     manifest: Manifest | None = None
     package_dir: Path | None = None
+    image: str | None = None  # digest in the image store, see export_image()
     channel: Channel | None = None
     driver: Driver | None = None
     host: Host | None = None
@@ -74,8 +76,13 @@ class Device:
             # What the device calls itself (e.g. its USB product string) is
             # more specific than the package, which may cover a whole family.
             "display_name": self.display_name(),
+            "category": self.manifest.category if self.manifest else None,
+            # Digest of the device's picture in the image store (service.info).
+            "image": self.image,
             "status": str(self.status),
             "status_text": self.status_text(),
+            "battery": self.battery(),
+            "available": self.available(),
             "error": self.error,
             "needs": self.needs,
             "package": pkg,
@@ -99,6 +106,34 @@ class Device:
         key = str(value).lower() if isinstance(value, bool) or value is None else str(value)
         return spec.get("map", {}).get(key, None if value is None else str(value))
 
+    def state(self) -> dict[str, Any]:
+        return {**(self.driver.state if self.driver else {}), **(self.host.state if self.host else {})}
+
+    def available(self) -> bool:
+        """False while a ready device can't be used (manifest ``available``),
+        e.g. a dongle whose headset is switched off."""
+        spec = self.manifest.available if self.manifest else None
+        return spec is None or self.status is not DeviceStatus.READY or spec(self.state())
+
+    def battery(self) -> dict[str, Any] | None:
+        """``{"level": 0-100 or None, "charging": bool, "refresh": action or
+        None}`` for packages with a ``battery`` section, else None."""
+        spec = self.manifest.battery if self.manifest else None
+        if spec is None or self.status is not DeviceStatus.READY:
+            return None
+        state = self.state()
+        level = state.get(spec.level)
+        if isinstance(level, bool) or not isinstance(level, (int, float)):
+            level = None
+        else:
+            level = max(0, min(100, round(level)))
+        can_refresh = spec.refresh and (not spec.refresh_if or bool(state.get(spec.refresh_if)))
+        return {
+            "level": level,
+            "charging": bool(spec.charging and state.get(spec.charging)),
+            "refresh": spec.refresh if can_refresh else None,
+        }
+
     def detail(self) -> dict[str, Any]:
         d = self.summary()
         d["ui"] = self.manifest.ui if self.manifest else []
@@ -106,8 +141,28 @@ class Device:
             name: {"params": spec.get("params", {})}
             for name, spec in (self.manifest.raw.get("actions", {}) if self.manifest else {}).items()
         }
-        d["state"] = {**(self.driver.state if self.driver else {}), **(self.host.state if self.host else {})}
+        d["state"] = self.state()
         return d
+
+
+def export_image(manifest: Manifest, package_dir: Path, ident: DeviceIdentity, store_dir: Path) -> str | None:
+    """Put the device's picture in the image store and return its digest, or
+    None so clients fall back to the theme icon.
+
+    A bad image never stops the device from working; it is logged and skipped.
+    """
+    if not (rel := manifest.image_for(ident)):
+        return None
+    try:
+        path = (package_dir / rel).resolve()
+        if not path.is_relative_to(package_dir.resolve()):  # symlink out of a local package
+            raise images.ImageError("image is outside the package")
+        with path.open("rb") as f:
+            data = f.read(images.MAX_BYTES + 1)
+        return images.store(store_dir, data)
+    except (OSError, images.ImageError) as e:
+        log.warning("%s: ignoring image %s: %s", manifest.id, rel, e)
+        return None
 
 
 class DeviceManager:
@@ -117,6 +172,7 @@ class DeviceManager:
         self.emit = emit
         self.data_dir = registry.cfg.data_dir
         self.cache_dir = registry.cfg.cache_dir
+        self.image_store = registry.cfg.cache_dir / "images"
         self.devices: dict[str, Device] = {}
 
     # -- DeviceSink ------------------------------------------------------------
@@ -184,7 +240,7 @@ class DeviceManager:
             # Came back before the old connection finished closing.
             await asyncio.shield(dev.teardown)
             dev.teardown = None
-        dev.candidate = dev.manifest = dev.package_dir = None
+        dev.candidate = dev.manifest = dev.package_dir = dev.image = None
         try:
             self._set(dev, DeviceStatus.RESOLVING)
             cand = await self.registry.resolve(dev.ident)
@@ -194,6 +250,7 @@ class DeviceManager:
                 return
             dev.candidate = cand
             dev.manifest, dev.package_dir = await self.registry.fetch(cand)
+            dev.image = export_image(dev.manifest, dev.package_dir, dev.ident, self.image_store)
             self._set(dev, DeviceStatus.CONNECTING)
             await self._connect(dev)
             self._set(dev, DeviceStatus.READY)
@@ -243,11 +300,17 @@ class DeviceManager:
 
         uid = ident.uid
 
-        summary_key = (manifest.raw.get("summary") or {}).get("state")
+        # State that the summary shows (status line, battery): clients
+        # listing devices get a new summary when it changes.
+        summary_keys = {(manifest.raw.get("summary") or {}).get("state")} - {None}
+        if manifest.battery:
+            summary_keys |= manifest.battery.keys
+        if manifest.available:
+            summary_keys.add(manifest.available.state)
 
         def publish(changes: dict[str, Any]) -> None:
             self.emit("device.state", {"uid": uid, "changes": changes})
-            if summary_key in changes and dev.status is DeviceStatus.READY:
+            if summary_keys & changes.keys() and dev.status is DeviceStatus.READY:
                 self.emit("device.changed", dev.summary())
 
         host = Host(audio=self._audio_service(manifest, ident, publish))
@@ -261,8 +324,7 @@ class DeviceManager:
 
     @staticmethod
     def _matching_rule_has_channel(manifest: Manifest, ident: DeviceIdentity) -> bool:
-        scored = [(r.score(ident), r) for r in manifest.match]
-        best = max(scored, key=lambda sr: sr[0], default=(0, None))[1]
+        best = manifest.best_rule(ident)
         return best is None or best.channel
 
     def _audio_service(self, manifest: Manifest, ident: DeviceIdentity, publish) -> HostAudio | None:

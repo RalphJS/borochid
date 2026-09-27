@@ -53,12 +53,21 @@ def test_examples_are_valid(examples):
         ({"driver": {"type": "x", "provided_by": "gnome-shell"}}, "provided_by must match"),
         ({"driver": {"type": "x", "version": "~1"}}, "invalid version spec"),
         ({"schema": 99}, "newer than supported"),
+        ({"category": ["headset"]}, "category must be a string"),
     ],
 )
 def test_manifest_validation(patch, message):
     base = {"id": "a.b", "version": "1.0.0", "match": [{"bus": "usb", "vid": 1}], "channel": {"type": "hid"}}
     with pytest.raises(ManifestError, match=message):
         Manifest.from_json({**base, **patch})
+
+
+@pytest.mark.parametrize("given, expected", [(None, "other"), ("headset", "headset"), ("hologram", "other")])
+def test_category_defaults_and_tolerates_newer_values(given, expected):
+    d = {"id": "a.b", "version": "1.0.0", "match": [{"bus": "usb", "vid": 1}], "channel": {"type": "hid"}}
+    if given:
+        d["category"] = given
+    assert Manifest.from_json(d).category == expected
 
 
 def test_version_specs():

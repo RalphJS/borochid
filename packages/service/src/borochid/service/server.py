@@ -99,7 +99,12 @@ class RpcServer:
     # -- methods -------------------------------------------------------------
 
     async def rpc_service_info(self) -> dict[str, Any]:
-        return {"version": __version__, "protocol": rpc.PROTOCOL_VERSION}
+        return {
+            "version": __version__,
+            "protocol": rpc.PROTOCOL_VERSION,
+            # Where device pictures named in summaries live (see common.images).
+            "image_store": str(self.manager.image_store),
+        }
 
     async def rpc_devices_list(self, include_unsupported: bool = False) -> list[dict[str, Any]]:
         devs = self.manager.devices.values()

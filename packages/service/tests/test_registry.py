@@ -159,3 +159,22 @@ def test_http_client_refuses_https_downgrade_redirects():
     req = urllib.request.Request("https://registry.example/v1/x")
     with pytest.raises(HttpError, match="refusing redirect"):
         handler.redirect_request(req, None, 302, "Found", {}, "http://evil.example/x")
+
+
+def test_check_rejects_oversized_and_missing_images(tmp_path, examples, png):
+    import json
+
+    pkg = tmp_path / "acme.pic"
+    (pkg / "images").mkdir(parents=True)
+    manifest = json.loads((examples / "acme.macropad" / "manifest.json").read_text())
+    (pkg / "manifest.json").write_text(json.dumps({**manifest, "image": "images/pad.png"}))
+    (pkg / "images" / "pad.png").write_bytes(png(1024, 1024))
+    result = cli("check", pkg, cwd=tmp_path)
+    assert result.returncode != 0 and "limit is 384x384" in result.stderr
+
+    (pkg / "images" / "pad.png").unlink()
+    result = cli("check", pkg, cwd=tmp_path)
+    assert result.returncode != 0 and "missing from the package" in result.stderr
+
+    (pkg / "images" / "pad.png").write_bytes(png(64, 64))
+    assert cli("check", pkg, cwd=tmp_path).returncode == 0

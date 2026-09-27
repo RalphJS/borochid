@@ -22,10 +22,10 @@ import json
 import re
 import string
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from borochid.common.models import Bus, MatchRule
+from borochid.common.models import Bus, DeviceIdentity, MatchRule
 
 MANIFEST_NAME = "manifest.json"
 SCHEMA_VERSION = 1
@@ -35,6 +35,12 @@ _SPEC_RE = re.compile(r"^(>=|<=|==|>|<)\s*(\d+(?:\.\d+){0,2})$")
 # Packages a manifest may ask the user to install. Constrained so a manifest
 # can never steer PackageKit toward arbitrary system packages.
 DRIVER_PACKAGE_RE = re.compile(r"^borochid-driver-[a-z0-9][a-z0-9-]*$")
+# What kind of device a package describes; the GUI picks the device's icon
+# from the desktop icon theme by category, so packages never carry images.
+# Unknown values read as "other", so a newer package still loads here.
+CATEGORIES = frozenset(
+    {"headset", "headphones", "speaker", "microphone", "keyboard", "keypad", "mouse", "gamepad", "tablet", "webcam", "other"}
+)
 
 
 class ManifestError(ValueError):
@@ -157,6 +163,73 @@ class DriverRef:
 
 
 @dataclass(frozen=True)
+class BatterySpec:
+    """Which driver state holds the battery, so every client can show it the
+    same way (a battery icon for the level, a bolt while charging)::
+
+        "battery": {"level": "battery", "charging": "charging",
+                    "refresh": "refresh_battery", "refresh_if": "online"}
+
+    ``level`` is a percentage. ``refresh`` names an action that asks the
+    device for a new reading, offered while ``refresh_if`` is truthy.
+    """
+
+    level: str
+    charging: str | None = None
+    refresh: str | None = None
+    refresh_if: str | None = None
+
+    @classmethod
+    def from_json(cls, d: Any) -> BatterySpec:
+        if not isinstance(d, dict) or not isinstance(d.get("level"), str):
+            raise ManifestError("battery.level must name a state key")
+        extra = {k: d.get(k) for k in ("charging", "refresh", "refresh_if")}
+        if any(v is not None and not isinstance(v, str) for v in extra.values()):
+            raise ManifestError("battery.charging, refresh and refresh_if must be strings")
+        return cls(d["level"], **extra)
+
+    @property
+    def keys(self) -> frozenset[str]:
+        """State keys whose changes alter what clients show."""
+        return frozenset(k for k in (self.level, self.charging, self.refresh_if) if k)
+
+
+def state_key(value: Any) -> str:
+    """How a state value is written in manifest maps: ``true``, ``null``, ``3``."""
+    return str(value).lower() if isinstance(value, bool) or value is None else str(value)
+
+
+@dataclass(frozen=True)
+class AvailabilitySpec:
+    """When a device that is plugged in can actually be used, e.g. a wireless
+    dongle whose headset is switched off cannot::
+
+        "available": "online"                                   # truthy state
+        "available": {"state": "link", "values": ["online", "wired"]}
+
+    While it is unavailable, clients fade its picture, hide its battery and
+    disable its settings.
+    """
+
+    state: str
+    values: frozenset[str] | None = None
+
+    @classmethod
+    def from_json(cls, d: Any) -> AvailabilitySpec:
+        if isinstance(d, str):
+            return cls(d)
+        if isinstance(d, dict) and isinstance(d.get("state"), str):
+            values = d.get("values")
+            if values is None or (isinstance(values, list) and values):
+                return cls(d["state"], None if values is None else frozenset(state_key(v) for v in values))
+        raise ManifestError('available must be a state key or {"state": key, "values": [...]}')
+
+    def __call__(self, state: dict[str, Any]) -> bool:
+        value = state.get(self.state)
+        return bool(value) if self.values is None else state_key(value) in self.values
+
+
+@dataclass(frozen=True)
 class Manifest:
     id: str
     version: str
@@ -166,10 +239,24 @@ class Manifest:
     driver: DriverRef
     raw: dict[str, Any]
     display_names: tuple[DisplayNameRule, ...] = ()
+    category: str = "other"
+    image: str | None = None
+    battery: BatterySpec | None = None
+    available: AvailabilitySpec | None = None
 
     @property
     def ui(self) -> list[dict[str, Any]]:
         return self.raw.get("ui", [])
+
+    def best_rule(self, ident: DeviceIdentity) -> MatchRule | None:
+        scored = [(r.score(ident), r) for r in self.match]
+        score, rule = max(scored, key=lambda sr: sr[0], default=(0, None))
+        return rule if score else None
+
+    def image_for(self, ident: DeviceIdentity) -> str | None:
+        """Package-relative path of the device's picture, if the package has one."""
+        rule = self.best_rule(ident)
+        return (rule.image if rule else None) or self.image
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> Manifest:
@@ -190,9 +277,18 @@ class Manifest:
                 raise ManifestError("channel.type is required")
             driver = DriverRef.from_json(d.get("driver", {"type": "declarative"}))
             names = tuple(DisplayNameRule.from_json(r) for r in d.get("display_name", []))
+            category = d.get("category", "other")
+            if not isinstance(category, str):
+                raise ManifestError("category must be a string")
+            battery = BatterySpec.from_json(d["battery"]) if "battery" in d else None
+            available = AvailabilitySpec.from_json(d["available"]) if "available" in d else None
+            image = _image_path(d.get("image"))
+            for rule in rules:
+                _image_path(rule.image)
         except KeyError as e:
             raise ManifestError(f"missing required field {e.args[0]!r}") from None
-        return cls(pkg_id, version, d.get("name", pkg_id), rules, channel, driver, d, names)
+        category = category if category in CATEGORIES else "other"
+        return cls(pkg_id, version, d.get("name", pkg_id), rules, channel, driver, d, names, category, image, battery, available)
 
     @classmethod
     def load(cls, package_dir: Path) -> Manifest:
@@ -201,6 +297,16 @@ class Manifest:
             return cls.from_json(json.loads(path.read_text()))
         except json.JSONDecodeError as e:
             raise ManifestError(f"{path}: {e}") from None
+
+
+def _image_path(path: Any) -> str | None:
+    """A PNG inside the package, as a plain relative path."""
+    if path is None:
+        return None
+    p = PurePosixPath(path) if isinstance(path, str) else None
+    if p is None or p.is_absolute() or ".." in p.parts or "\\" in path or p.suffix != ".png":
+        raise ManifestError(f"image must be a relative path to a .png inside the package, got {path!r}")
+    return p.as_posix()
 
 
 def shard_key_for_rule(rule: MatchRule) -> str:
