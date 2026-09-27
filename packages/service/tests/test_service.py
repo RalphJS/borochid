@@ -265,6 +265,93 @@ def test_display_name_prefers_what_the_device_reports(tmp_path, examples):
         await asyncio.gather(manager.devices["usb:1"].task, manager.devices["usb:2"].task)
         assert manager.devices["usb:1"].summary()["display_name"] == "Acme Macropad Pro 2 (Rev B)"
         assert manager.devices["usb:2"].summary()["display_name"] == "Acme Macropad"  # package name fallback
+        assert manager.devices["usb:1"].summary()["category"] == "keypad"
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_device_picture_is_exported_to_the_image_store(tmp_path, examples, png):
+    import shutil
+
+    from borochid.common import images
+    from borochid.common.models import Bus, DeviceIdentity
+
+    pkgs = tmp_path / "pkgs"
+    shutil.copytree(examples / "acme.macropad", pkgs / "acme.macropad")
+    manifest = json.loads((pkgs / "acme.macropad" / "manifest.json").read_text())
+    (pkgs / "acme.macropad" / "manifest.json").write_text(json.dumps({**manifest, "image": "pad.png"}))
+    (pkgs / "acme.macropad" / "pad.png").write_bytes(png(32, 32))
+
+    async def go():
+        cfg = Config(local_packages_dir=pkgs, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: None)
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
+        await manager.devices["usb:1"].task
+        digest = manager.devices["usb:1"].summary()["image"]
+        assert images.load(manager.image_store, digest) == png(32, 32)
+
+        # A bad picture is skipped; the device still comes up.
+        (pkgs / "acme.macropad" / "pad.png").write_bytes(png(999, 999))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:2", vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
+        await manager.devices["usb:2"].task
+        assert manager.devices["usb:2"].summary()["image"] is None
+        assert manager.devices["usb:2"].status == "ready"
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_battery_is_part_of_the_summary_and_announced_when_it_changes(tmp_path, examples):
+    from borochid.common.models import Bus, DeviceIdentity
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
+        dev = manager.devices["usb:1"]
+        await dev.task
+        assert dev.summary()["battery"] == {"level": None, "charging": False, "refresh": None}
+
+        events.clear()
+        dev.driver.on_data(bytes.fromhex("0257"))  # the example's battery report: 0x57 = 87%
+        changed = [p for m, p in events if m == "device.changed"]
+        assert changed and changed[-1]["battery"]["level"] == 87
+
+        events.clear()
+        dev.driver.on_data(bytes.fromhex("0340"))  # brightness: not shown in the summary
+        assert not [m for m, _ in events if m == "device.changed"]
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_unavailable_device_is_announced_and_says_so(tmp_path, examples):
+    import shutil
+
+    from borochid.common.models import Bus, DeviceIdentity
+
+    pkgs = tmp_path / "pkgs"
+    shutil.copytree(examples / "acme.macropad", pkgs / "acme.macropad")
+    path = pkgs / "acme.macropad" / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["available"] = {"state": "brightness", "values": [128]}  # stand-in for a link state
+    path.write_text(json.dumps(manifest))
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=pkgs, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
+        dev = manager.devices["usb:1"]
+        await dev.task
+        assert dev.summary()["available"] is True
+
+        events.clear()
+        dev.driver.on_data(bytes.fromhex("0340"))  # brightness 64: "unavailable"
+        changed = [p for m, p in events if m == "device.changed"]
+        assert changed and changed[-1]["available"] is False
         await manager.shutdown()
 
     asyncio.run(go())

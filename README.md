@@ -130,6 +130,19 @@ plugin). Key sections:
   a final `*` matches the rest), deliberately not a regex, so package data
   can't make the service spend exponential time. Without a match the
   reported name is shown.
+* `category`: what kind of device it is (`headset`, `headphones`,
+  `speaker`, `microphone`, `keyboard`, `keypad`, `mouse`, `gamepad`,
+  `tablet`, `webcam`, `other`). The GUI shows the matching icon from the
+  desktop's icon theme when the package has no picture. Unknown values read
+  as `other`.
+* `image`: a picture of the device, e.g. `"images/virtuoso.png"`. A match
+  rule can set its own `image` for models that look different. PNG only, at
+  most 384×384 and 256 KiB; `borochid-registry check` and `build` refuse
+  anything else. The service re-checks the picture and exports it to a
+  content-addressed image store (`<cache>/images/<sha256>.png`); device
+  summaries name the digest and the GUI reads the file from there, checking
+  the digest and header again before decoding. A bad picture is skipped
+  and the device falls back to its category icon.
 * `summary`: `{"state": key, "map": {...}}`, the device list's status line
   taken from driver state (e.g. "Headset off" instead of "Ready").
 * `match`: rules such as `{"bus": "usb", "vid": "0x1209", "pid": "0xb0c1"}`,
@@ -142,9 +155,31 @@ plugin). Key sections:
   (`notify`/`write` characteristic UUIDs).
 * `state`, `inputs`, `actions`, `init`: declarative protocol (struct formats,
   `$param` bindings). Documented in `packages/service/src/borochid/service/drivers/declarative.py`.
-* `ui`: widget list (`readout` with an optional `map`, `slider`, `spin`,
-  `toggle`, `select`, `color`, `button`, `group`). Any widget can set
-  `enabled_if` to a state key. New widget types go in `packages/gui/src/borochid/gui/widgets.py` via `@widget("name")`.
+* `battery`: `{"level": key, "charging": key, "refresh": action,
+  "refresh_if": key}`, which driver state holds the battery. The level is a
+  percentage; the GUI shows it the same way for every device (a battery icon
+  on the device's tile and next to its status, with a bolt while charging, and
+  a refresh button running `refresh` while `refresh_if` is truthy). Only
+  `level` is required.
+* `available`: when a plugged-in device can actually be used, as a state key
+  (`"online"`, usable while truthy) or `{"state": "link", "values":
+  ["online", "wired"]}`. While it isn't (a wireless headset switched off),
+  the GUI fades its picture, hides its battery and disables its settings.
+* `ui`: widget list: `readout` (optional `map`), `slider`, `spin`,
+  `toggle`, `select`, `color` (a swatch plus a colour-picker button),
+  `button`, `group` (a section; with two or more top-level groups the
+  device page shows each as a section picked with an icon button: the
+  group's `icon`, with its `label` on hover)
+  and `row` (children side by side,
+  each child's `label` shown just before it, e.g. a light's colour and
+  brightness). Any widget can set `tooltip` and `enabled_if` (a state key).
+  `readout`, `slider` and `button` take an `icon`: a desktop theme icon name
+  (`"view-refresh"`), or a list of names to cover different themes; a
+  readout's icon can follow its value with `{"map": {value: name}}`. The
+  device page shows settings on the left and the device (picture, name,
+  status, battery) on the right: a top-level item joins the device column
+  with `"section": "status"`, and top-level `readout`s go there by default. New widget types go in
+  `packages/gui/src/borochid/gui/widgets.py` via `@widget("name")`.
 * `simulation`: how the fake device behaves under `--sim`.
 
 ## Publishing a registry

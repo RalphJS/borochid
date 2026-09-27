@@ -82,6 +82,8 @@ class MatchRule:
     # False for ``"channel": null``: the device is recognised (e.g. a dongle
     # with no headset linked) but there is nothing to open or talk to.
     channel: bool = True
+    # Picture for the models this rule matches, overriding the package's.
+    image: str | None = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> MatchRule:
@@ -95,6 +97,7 @@ class MatchRule:
             company_id=parse_int(d["company_id"]) if "company_id" in d else None,
             name_prefix=d.get("name_prefix"),
             channel=d.get("channel", True) is not None,
+            image=d.get("image"),
         )
 
     def score(self, ident: DeviceIdentity) -> int:
