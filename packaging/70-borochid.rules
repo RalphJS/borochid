@@ -1,0 +1,12 @@
+# Device access for Borochid.
+#
+# Driver packages (borochid-driver-*) install narrow rules for exactly the
+# devices they support, so nothing is needed here for them.
+#
+# Devices driven by the built-in declarative driver have no system package to
+# carry a rule. Grant access per vendor/product, never to every hidraw node.
+# TAG+="uaccess" gives the active local session user access (the file must
+# sort before 73-seat-late.rules); avoid MODE="0666", which opens the device
+# to every user and service on the machine.
+#
+# SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b0c1", TAG+="uaccess"

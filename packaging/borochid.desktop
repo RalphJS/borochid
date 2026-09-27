@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Borochid
+GenericName=Peripheral Settings
+Comment=Configure headsets, keyboards and other peripherals
+Exec=borochid
+# Theme name, never an absolute path: shells cache icons per path, so a
+# replaced file would keep showing the old icon.
+Icon=borochid
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=headset;peripheral;rgb;battery;device;
+StartupWMClass=borochid

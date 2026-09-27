@@ -1,0 +1,4 @@
+-e packages/common
+-e packages/service[all]
+-e packages/gui
+pytest>=8

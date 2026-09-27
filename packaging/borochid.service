@@ -1,0 +1,11 @@
+# systemd user unit: install to ~/.config/systemd/user/ and run
+#   systemctl --user enable --now borochid
+[Unit]
+Description=Borochid peripheral service
+
+[Service]
+ExecStart=%h/.local/bin/borochid-service
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+# Workspace root. The distributable packages live in packages/*; install them
+# for development with:  pip install -r requirements-dev.txt
+
+[tool.pytest.ini_options]
+testpaths = ["packages/common/tests", "packages/service/tests", "packages/gui/tests"]
+addopts = "--import-mode=importlib"
