@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "borochid-common"
+version = "0.1.0"
+description = "Shared protocol, models and package manifest schema for Borochid"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = []
+
+# `borochid` is a PEP 420 namespace shared by all distributions in this repo:
+# no borochid/__init__.py anywhere.
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["borochid.common*"]
+namespaces = true

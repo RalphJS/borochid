@@ -1,0 +1,62 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / build
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Test, coverage and tool caches
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.hypothesis/
+
+# --- Qt ---------------------------------------------------------------------
+# Generated from .ui / .qrc files by pyuic6 / pyrcc
+ui_*.py
+*_rc.py
+*.qm
+
+# --- Borochid ---------------------------------------------------------------
+# Output of `borochid-registry build` when run locally
+/registry-out/
+# Signing keys: never commit private keys (*.pub files are fine)
+*.key
+# Local runtime artifacts
+*.sock
+*.log
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- Environment / secrets --------------------------------------------------
+.env
+.env.*

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "borochid-service"
+version = "0.1.0"
+description = "Borochid peripheral service: device detection, on-demand packages, drivers"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "borochid-common>=0.1,<0.2",
+    "pyudev>=0.24; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+serial = ["pyserial>=3.5"]
+libusb = ["pyusb>=1.2"]
+ble = ["bleak>=0.22"]
+signing = ["cryptography>=42"]
+all = ["borochid-service[serial,libusb,ble,signing]"]
+
+[project.scripts]
+borochid-service = "borochid.service.__main__:main"
+borochid-registry = "borochid.service.registry.build:main"
+
+# Built-in plugins. Third-party packages extend the service by registering
+# entries in these same groups.
+[project.entry-points."borochid.detectors"]
+udev = "borochid.service.detectors.udev:UdevDetector"
+ble = "borochid.service.detectors.ble:BleDetector"
+sim = "borochid.service.detectors.sim:SimDetector"
+
+[project.entry-points."borochid.channels"]
+hid = "borochid.service.channels.hid:HidChannel"
+serial = "borochid.service.channels.serial:SerialChannel"
+libusb = "borochid.service.channels.libusb:LibusbChannel"
+ble = "borochid.service.channels.ble:BleChannel"
+sim = "borochid.service.channels.sim:SimChannel"
+
+[project.entry-points."borochid.drivers"]
+declarative = "borochid.service.drivers.declarative:DeclarativeDriver"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["borochid.service*"]
+namespaces = true

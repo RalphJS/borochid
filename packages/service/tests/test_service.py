@@ -1,0 +1,270 @@
+"""End-to-end: simulated device -> local package -> declarative driver -> RPC."""
+
+import asyncio
+import json
+
+from borochid.common import rpc
+from borochid.service.config import Config
+from borochid.service.detectors.sim import SimDetector
+from borochid.service.devices import DeviceManager
+from borochid.service.registry.client import Registry
+from borochid.service.server import RpcServer
+
+
+def test_sim_device_end_to_end(tmp_path, examples):
+    async def go():
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "cache", data_dir=tmp_path / "data", socket_path=tmp_path / "d.sock")
+        server = RpcServer(cfg.socket_path)
+        manager = DeviceManager(Registry(cfg), server.broadcast)
+        server.manager = manager
+        await server.start()
+        reader, writer = await asyncio.open_unix_connection(str(cfg.socket_path))
+        await SimDetector(manager).start()
+
+        async def call(id_, method, **params):
+            writer.write(rpc.request(id_, method, params))
+            while True:
+                msg = json.loads(await reader.readline())
+                if msg.get("id") == id_:
+                    return msg
+                notes.append(msg)
+
+        notes = []
+        for _ in range(50):
+            devs = (await call(1, "devices.list"))["result"]
+            if devs and devs[0]["status"] == "ready":
+                break
+            await asyncio.sleep(0.02)
+        assert devs[0]["package"]["id"] == "acme.macropad"
+
+        uid = devs[0]["uid"]
+        detail = (await call(2, "device.get", uid=uid))["result"]
+        assert detail["ui"] and "set_brightness" in detail["actions"]
+
+        assert "result" in await call(3, "device.invoke", uid=uid, action="set_brightness", params={"value": 42})
+        # The sim echoes the report; the declarative input rule turns it into state.
+        while not any(n.get("method") == "device.state" and n["params"]["changes"].get("brightness") == 42 for n in notes):
+            notes.append(json.loads(await asyncio.wait_for(reader.readline(), 2)))
+
+        err = await call(4, "device.invoke", uid=uid, action="set_brightness", params={"value": 999})
+        assert err["error"]["code"] == rpc.DEVICE_ERROR
+
+        writer.close()
+        await manager.shutdown()
+        await server.stop()
+
+    asyncio.run(go())
+
+
+def test_missing_driver_reports_package_without_opening_device(tmp_path):
+    """The device stays untouched until the driver package is installed."""
+    import shutil
+
+    from borochid.common.models import Bus, DeviceIdentity
+
+    pkgs = tmp_path / "pkgs"
+    pkg = pkgs / "acme.headset"
+    pkg.mkdir(parents=True)
+    (pkg / "manifest.json").write_text(json.dumps({
+        "id": "acme.headset", "version": "1.0.0",
+        "match": [{"bus": "usb", "vid": "0x1234", "pid": "0x0001"}],
+        "channel": {"type": "hid"},
+        "driver": {"type": "acme-proto", "version": ">=1.0", "provided_by": "borochid-driver-acme-proto"},
+    }))
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=pkgs, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:9-9", vid=0x1234, pid=0x0001, attrs={"sys_path": "/nonexistent"}))
+        await manager.devices["usb:9-9"].task
+        dev = manager.devices["usb:9-9"]
+        assert dev.status == "needs_driver" and dev.channel is None
+        assert dev.summary()["needs"]["provided_by"] == "borochid-driver-acme-proto"
+        assert manager.retry() == 1  # e.g. after the GUI installed the package
+        await manager.devices["usb:9-9"].task
+        await manager.shutdown()
+
+    asyncio.run(go())
+    shutil.rmtree(pkgs)
+
+
+def test_bring_up_waits_for_the_node_ready_event(tmp_path, examples, monkeypatch):
+    """udev announces the USB device before its hidraw node is usable."""
+    from borochid.common.models import Bus, DeviceIdentity
+    from borochid.service import plugins
+    from borochid.service.channels import ChannelNotReady
+    from borochid.service.channels.sim import SimChannel
+
+    attempts = []
+
+    class LateNode(SimChannel):
+        ready = False
+
+        def __init__(self, ident, spec):
+            super().__init__(ident, spec)
+
+        async def open(self):
+            attempts.append(LateNode.ready)
+            if not LateNode.ready:
+                raise ChannelNotReady("no access to /dev/hidraw9 yet")
+
+    real_load = plugins.load
+    monkeypatch.setattr(plugins, "load", lambda g, n: LateNode if g == plugins.CHANNELS else real_load(g, n))
+
+    async def go():
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: None)
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1-2.4", vid=0x1209, pid=0xB0C1))
+        await manager.devices["usb:1-2.4"].task
+        dev = manager.devices["usb:1-2.4"]
+        assert dev.status == "connecting" and "no access" in dev.error
+
+        LateNode.ready = True
+        manager.device_changed("usb:1-2.4")  # udev: hidraw node processed
+        await manager.devices["usb:1-2.4"].task
+        assert dev.status == "ready" and attempts == [False, True]
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_ready_event_during_bring_up_is_not_lost(tmp_path, examples, monkeypatch):
+    from borochid.common.models import Bus, DeviceIdentity
+    from borochid.service import plugins
+    from borochid.service.channels import ChannelNotReady
+    from borochid.service.channels.sim import SimChannel
+
+    manager_ref = {}
+
+    class RacingNode(SimChannel):
+        calls = 0
+
+        def __init__(self, ident, spec):
+            super().__init__(ident, spec)
+
+        async def open(self):
+            RacingNode.calls += 1
+            if RacingNode.calls == 1:
+                manager_ref["m"].device_changed("usb:1-2.4")  # arrives mid-bring-up
+                raise ChannelNotReady("not yet")
+
+    real_load = plugins.load
+    monkeypatch.setattr(plugins, "load", lambda g, n: RacingNode if g == plugins.CHANNELS else real_load(g, n))
+
+    async def go():
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = manager_ref["m"] = DeviceManager(Registry(cfg), lambda m, p: None)
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1-2.4", vid=0x1209, pid=0xB0C1))
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if manager.devices["usb:1-2.4"].status == "ready":
+                break
+        assert manager.devices["usb:1-2.4"].status == "ready" and RacingNode.calls == 2
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def _mode_switching_package(root):
+    """A dongle that is 1234:0001 with its headset linked and 1234:0002 without."""
+    pkg = root / "acme.dongle"
+    pkg.mkdir(parents=True)
+    (pkg / "manifest.json").write_text(json.dumps({
+        "id": "acme.dongle", "version": "1.0.0",
+        "match": [
+            {"bus": "usb", "vid": "0x1234", "pid": "0x0001"},
+            {"bus": "usb", "vid": "0x1234", "pid": "0x0002", "channel": None},
+        ],
+        "channel": {"type": "hid"},
+        "driver": {"type": "declarative"},
+        "state": {"mode": "on"},
+        "summary": {"state": "mode", "map": {"on": "Connected"}},
+    }))
+    return root
+
+
+def test_mode_switch_re_enumeration_keeps_one_device(tmp_path, monkeypatch):
+    from borochid.common.models import Bus, DeviceIdentity
+    from borochid.service import plugins
+    from borochid.service.channels import NullChannel
+    from borochid.service.channels.sim import SimChannel
+
+    opened = []
+
+    class Hid(SimChannel):
+        def __init__(self, ident, spec):
+            super().__init__(ident, spec)
+
+        async def open(self):
+            opened.append(self.ident.pid)
+
+    real_load = plugins.load
+    monkeypatch.setattr(plugins, "load", lambda g, n: Hid if g == plugins.CHANNELS else real_load(g, n))
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=_mode_switching_package(tmp_path / "pkgs"), cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)), grace_s=0.2)
+        linked = DeviceIdentity(Bus.USB, "usb:1-2.4", vid=0x1234, pid=0x0001, serial="S1")
+        idle = DeviceIdentity(Bus.USB, "usb:1-2.4", vid=0x1234, pid=0x0002, serial="S1")
+
+        manager.device_added(linked)
+        await manager.devices["usb:1-2.4"].task
+        dev = manager.devices["usb:1-2.4"]
+        assert dev.summary()["status_text"] == "Connected"
+
+        manager.device_removed("usb:1-2.4")  # headset switched off: dongle drops off USB...
+        assert dev.status == "disconnected"
+        manager.device_added(idle)  # ...and comes back as the idle product
+        await dev.task
+        assert manager.devices["usb:1-2.4"] is dev and dev.status == "ready"
+        assert isinstance(dev.channel, NullChannel), "nothing is opened in idle mode"
+        assert opened == [0x0001]
+
+        manager.device_removed("usb:1-2.4")
+        manager.device_added(linked)  # headset back on
+        await dev.task
+        assert opened == [0x0001, 0x0001]
+        assert [m for m, _ in events].count("device.removed") == 0
+        assert [m for m, _ in events].count("device.added") == 1
+
+        manager.device_removed("usb:1-2.4")  # dongle unplugged for real
+        await asyncio.sleep(0.3)
+        assert "usb:1-2.4" not in manager.devices and ("device.removed", {"uid": "usb:1-2.4"}) in events
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_different_serial_on_the_same_port_is_a_new_device(tmp_path):
+    from borochid.common.models import Bus, DeviceIdentity
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=tmp_path / "none", cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append(m), grace_s=5)
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1-1", vid=1, pid=1, serial="A"))
+        manager.device_removed("usb:1-1")
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1-1", vid=1, pid=1, serial="B"))
+        assert events.count("device.removed") == 1 and events.count("device.added") == 2
+        assert manager.devices["usb:1-1"].ident.serial == "B"
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_display_name_prefers_what_the_device_reports(tmp_path, examples):
+    from borochid.common.models import Bus, DeviceIdentity
+
+    async def go():
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: None)
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, name="Acme Macropad Pro 2 (Rev B)", attrs={"simulated": True}))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:2", vid=0x1209, pid=0xB0C1, name="  ", attrs={"simulated": True}))
+        await asyncio.gather(manager.devices["usb:1"].task, manager.devices["usb:2"].task)
+        assert manager.devices["usb:1"].summary()["display_name"] == "Acme Macropad Pro 2 (Rev B)"
+        assert manager.devices["usb:2"].summary()["display_name"] == "Acme Macropad"  # package name fallback
+        await manager.shutdown()
+
+    asyncio.run(go())

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "id": "acme.macropad",
+  "version": "1.0.0",
+  "name": "Acme Macropad",
+  "match": [
+    {"bus": "usb", "vid": "0x1209", "pid": "0xb0c1"}
+  ],
+  "channel": {"type": "hid", "interface": 1, "report_size": 32},
+  "driver": {"type": "declarative"},
+
+  "state": {"battery": null, "brightness": 128, "color": "#3366ff", "mode": 0},
+  "inputs": [
+    {"prefix": "02", "fields": {"battery": {"offset": 1, "format": "B"}}},
+    {"prefix": "03", "fields": {"brightness": {"offset": 1, "format": "B"}}}
+  ],
+  "actions": {
+    "set_brightness": {
+      "params": {"value": {"type": "int", "min": 0, "max": 255}},
+      "write": [{"format": "BB", "values": [3, "$value"]}]
+    },
+    "set_color": {
+      "params": {"color": {"type": "color"}},
+      "write": [{"format": "BBBB", "values": [4, "$color.r", "$color.g", "$color.b"]}],
+      "state": {"color": "$color"}
+    },
+    "set_mode": {
+      "params": {"mode": {"type": "enum", "options": [0, 1, 2]}},
+      "write": [{"format": "BB", "values": [6, "$mode"]}],
+      "state": {"mode": "$mode"}
+    },
+    "identify": {"write": [{"format": "B", "values": [5]}]}
+  },
+  "ui": [
+    {"widget": "readout", "label": "Battery", "state": "battery", "suffix": "%"},
+    {"widget": "group", "label": "Lighting", "children": [
+      {"widget": "slider", "label": "Brightness", "min": 0, "max": 255, "state": "brightness", "action": "set_brightness", "param": "value"},
+      {"widget": "color", "label": "Color", "state": "color", "action": "set_color", "param": "color"},
+      {"widget": "select", "label": "Effect", "state": "mode", "action": "set_mode", "param": "mode",
+       "options": [{"value": 0, "label": "Static"}, {"value": 1, "label": "Breathing"}, {"value": 2, "label": "Rainbow"}]}
+    ]},
+    {"widget": "button", "label": "", "text": "Identify", "action": "identify"}
+  ],
+
+  "simulation": {
+    "periodic": [{"every": 2.0, "report": "02 ~~"}],
+    "echo": true
+  }
+}

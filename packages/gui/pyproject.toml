@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "borochid-gui"
+version = "0.1.0"
+description = "Borochid control center (PyQt6)"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "borochid-common>=0.1,<0.2",
+    "PyQt6>=6.6",
+]
+
+[project.gui-scripts]
+borochid = "borochid.gui.__main__:main"
+
+[tool.setuptools.package-data]
+"borochid.gui" = ["resources/*.png"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["borochid.gui*"]
+namespaces = true
