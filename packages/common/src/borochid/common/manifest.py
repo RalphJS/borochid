@@ -196,7 +196,9 @@ class BatterySpec:
 
 def state_key(value: Any) -> str:
     """How a state value is written in manifest maps: ``true``, ``null``, ``3``."""
-    return str(value).lower() if isinstance(value, bool) or value is None else str(value)
+    if value is None:
+        return "null"
+    return str(value).lower() if isinstance(value, bool) else str(value)
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,12 @@ A device package opts in through its manifest, e.g. ``"audio": {"match":
 ["corsair", "virtuoso"]}``. Each service owns a slice of the device's state
 and actions under its own prefix (``audio.volume``, ``audio.set_volume``),
 so UIs can bind to it without any driver code.
+
+* ``audio``: ALSA volume/sidetone, PipeWire mic mute (``host/audio.py``).
+* ``power``: the kernel's battery reading (``host/power.py``).
+* ``input``: a virtual input device for button remapping
+  (``host/input.py``). It is for driver code only and refuses every RPC
+  action.
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ from collections.abc import Callable
 from typing import Any
 
 from borochid.service.host.audio import HostAudio
+from borochid.service.host.input import HostInput
+from borochid.service.host.power import HostPower
 
 log = logging.getLogger(__name__)
 
@@ -22,12 +30,15 @@ Publish = Callable[[dict[str, Any]], None]
 
 
 class Host:
-    def __init__(self, audio: HostAudio | None = None):
+    def __init__(self, audio: HostAudio | None = None, power: HostPower | None = None, input: HostInput | None = None):
         self.audio = audio
+        self.power = power
+        self.input = input
 
     @property
     def services(self) -> dict[str, Any]:
-        return {name: svc for name, svc in (("audio", self.audio),) if svc is not None}
+        named = (("audio", self.audio), ("power", self.power), ("input", self.input))
+        return {name: svc for name, svc in named if svc is not None}
 
     @property
     def state(self) -> dict[str, Any]:

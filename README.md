@@ -84,6 +84,29 @@ shows as "Reconnecting…", and if the same device (same port, same serial)
 reappears within the grace period (3 s) it continues as the same entry, with
 its settings and GUI selection. Only when it stays away is it removed.
 
+## Devices on a wireless receiver
+
+A mouse or keyboard paired to a receiver (Logitech LIGHTSPEED/Unifying and
+the like) has no USB device of its own: the receiver's kernel driver creates
+a HID device for it under the receiver's. The udev detector reports each of
+those as a device, `usb:<receiver port>/<slot>`, with the paired device's own
+product ID and serial, so packages match it like any USB device. Its channel
+opens only its own hidraw node, never the receiver's, which carries the
+traffic of every device paired to it (keyboards included). The receiver is
+reported too, as an ordinary USB device.
+
+## Profiles
+
+Profiles ("Work", "Gaming") belong to the service and are shared by every
+device that supports them: switching profile at the top right of the GUI
+switches them all, and a device that connects later starts in the active
+profile. Each device keeps its own settings per profile (a mouse its DPI
+and buttons). The list lives in `<data_dir>/profiles.json` with stable ids,
+so renaming never touches device settings; a duplicated profile records
+its source, so a device that was unplugged at the time still starts from
+the right settings. Drivers opt in with `supports_profiles` and
+`use_profile()` (see `borochid.service.drivers.Driver`).
+
 ## Drivers
 
 | Where the logic lives | Examples | How it's trusted |
@@ -105,11 +128,23 @@ installing, the GUI calls `device.retry` and the service rescans its plugins.
 
 Driver plugins register in the `borochid.drivers` entry point group and
 subclass `borochid.service.drivers.Driver`. Drivers get per-device persisted
-`settings` and `host` services: `host.audio` (ALSA volume and sidetone,
-PipeWire mic mute, feedback tone) is enabled by a manifest `audio` section,
-so plugins never spawn processes. Its state and actions are namespaced
-(`audio.volume`, `audio.set_volume`), so manifests can bind UI to them
-directly.
+`settings` and `host` services, each enabled by a manifest section, so
+plugins never spawn processes or touch the host themselves:
+
+* `audio` (`host.audio`): ALSA volume and sidetone, PipeWire mic mute,
+  feedback tone. Its state and actions are namespaced (`audio.volume`,
+  `audio.set_volume`), so manifests can bind UI to them directly.
+* `power_supply` (`host.power`): the battery as the kernel already reports
+  it (`/sys/class/power_supply`, e.g. from hid-logitech-hidpp), with no
+  device access. State `power.level`, `power.charging`, `power.online`.
+* `input` (`host.input`): a uinput virtual device, so a driver can replay a
+  remapped button as a key chord, another mouse button or a wheel step.
+  **Driver code only:** it refuses every RPC action, so nothing on the
+  socket can make the service type. Keys come from an allow-list
+  (`borochid.common.keys`, no power/sleep/lock keys, at most 6 per chord),
+  a chord is held exactly as long as the physical button, and the device
+  exists only while a driver has buttons taken over. Needs the `input`
+  extra (python-evdev) and access to `/dev/uinput`.
 
 Device access: driver packages ship narrow udev rules (exact vendor and
 product IDs, `TAG+="uaccess"`). See `packaging/70-borochid.rules` for
@@ -167,12 +202,17 @@ plugin). Key sections:
   the GUI fades its picture, hides its battery and disables its settings.
 * `ui`: widget list: `readout` (optional `map`), `slider`, `spin`,
   `toggle`, `select`, `color` (a swatch plus a colour-picker button),
-  `button`, `group` (a section; with two or more top-level groups the
+  `button`, `stages` (an editable list such as DPI stages: add, remove, pick the
+  default and the current one), `buttons` (each button with its action
+  spelled out; an editor dialog offers the package's `categories` and a
+  shortcut recorder that works by physical key, with clickable modifiers
+  for shortcuts the desktop keeps for itself; `packages/gui/src/borochid/gui/binding_editor.py`), `group` (a section; with two or more top-level groups the
   device page shows each as a section picked with an icon button: the
   group's `icon`, with its `label` on hover)
   and `row` (children side by side,
   each child's `label` shown just before it, e.g. a light's colour and
-  brightness). Any widget can set `tooltip` and `enabled_if` (a state key).
+  brightness). Any widget can set `tooltip` and `enabled_if` (a state key; `"!key"`
+  enables it while the key is falsy).
   `readout`, `slider` and `button` take an `icon`: a desktop theme icon name
   (`"view-refresh"`), or a list of names to cover different themes; a
   readout's icon can follow its value with `{"map": {value: name}}`. The
@@ -221,8 +261,10 @@ Newline-delimited JSON-RPC 2.0 at `$XDG_RUNTIME_DIR/borochid.sock`.
 
 Methods: `service.info` (returns `version`, `protocol`), `devices.list {include_unsupported}`,
 `device.get {uid}`, `device.invoke {uid, action, params}`, `device.retry {uid?}`,
-`registry.refresh`. Notifications: `device.added`, `device.changed`, `device.removed`,
-`device.state {uid, changes}`.
+`registry.refresh`, `profiles.list`, `profiles.select {id}`,
+`profiles.add {name, duplicate}`, `profiles.rename {id, name}`, `profiles.remove {id}`.
+Notifications: `device.added`, `device.changed`, `device.removed`,
+`device.state {uid, changes}`, `profiles.changed`.
 
 ## Known limitations / next steps
 

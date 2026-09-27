@@ -4,7 +4,8 @@ Each schema item names a ``widget`` type. Builders are registered with
 ``@widget("name")``; adding a new control type means adding one function.
 Common keys: ``label``, ``state`` (state key the widget displays),
 ``action`` + ``param`` (what the widget invokes when the user changes it),
-``enabled_if`` (state key; the widget is disabled while it is falsy).
+``enabled_if`` (state key; the widget is disabled while it is falsy, or
+while it is truthy with a leading ``!``).
 
 ``tooltip`` sets hover text on any widget.
 
@@ -27,6 +28,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QFrame,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -85,8 +87,10 @@ def _build(item: dict[str, Any], ctx: PanelContext) -> QWidget:
     if tip := item.get("tooltip"):
         w.setToolTip(str(tip))
     if key := item.get("enabled_if"):
-        w.setEnabled(False)
-        ctx.watch(key, lambda v, w=w: w.setEnabled(bool(v)))
+        # "!key" enables the widget while the key is falsy instead.
+        negate = key.startswith("!")
+        w.setEnabled(negate)
+        ctx.watch(key.lstrip("!"), lambda v, w=w: w.setEnabled(bool(v) != negate))
     return w
 
 
@@ -120,7 +124,7 @@ def build_form(items: list[dict[str, Any]], ctx: PanelContext, parent: QWidget |
     form = QFormLayout(host)
     for item in items:
         w = _build(item, ctx)
-        if item.get("widget") in ("group", "form"):
+        if item.get("widget") in ("group", "form", "buttons"):
             form.addRow(w)
         else:
             form.addRow(item.get("label", ""), w)
@@ -188,7 +192,9 @@ def _group(item, ctx):
 
 
 def _map_key(v: Any) -> str:
-    return str(v).lower() if isinstance(v, bool) or v is None else str(v)
+    if v is None:
+        return "null"  # JSON's name, as manifests write it
+    return str(v).lower() if isinstance(v, bool) else str(v)
 
 
 @widget("readout")
@@ -346,3 +352,112 @@ def _button(item, ctx):
         b.setToolTip(item.get("label", ""))
     b.clicked.connect(lambda: ctx.send(item))
     return b
+
+
+_ADD_ICONS = ["list-add", "list-add-symbolic"]
+_REMOVE_ICONS = ["edit-delete", "list-remove", "user-trash"]
+
+
+def _tool(icons: list[str], fallback: str, tip: str) -> QToolButton:
+    b = QToolButton()
+    b.setAutoRaise(True)
+    if icon := theme_icon(icons):
+        b.setIcon(icon)
+    else:
+        b.setText(fallback)
+    b.setToolTip(tip)
+    return b
+
+
+class _StageCard(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked: Callable[[], None] = lambda: None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self.clicked()
+        super().mousePressEvent(event)
+
+
+@widget("stages")
+def _stages(item, ctx):
+    """An editable list of values (DPI stages), one row each: number, value,
+    a star for the default and a remove button. Clicking a row makes it
+    current; "Add stage" below adds one. Keys: ``state`` (the list),
+    ``current`` and ``default`` (1-based), ``min``/``max``/``step``,
+    ``max_items``, and the actions ``set`` ({stage, value}), ``add``
+    ({value}), ``remove``, ``make_default`` and ``select`` ({stage})."""
+    host = QWidget()
+    col = QVBoxLayout(host)
+    col.setContentsMargins(0, 0, 0, 0)
+    col.setSpacing(4)
+    known: dict[str, Any] = {"values": [], "current": None, "default": None}
+    lo, hi, step = int(item.get("min", 0)), int(item.get("max", 100000)), int(item.get("step", 1))
+    suffix = item.get("suffix", "")
+
+    def rebuild():
+        while col.count():
+            if w := col.takeAt(0).widget():
+                w.setParent(None)  # gone now, not at the next event loop turn
+                w.deleteLater()
+        values = known["values"]
+        for i, value in enumerate(values, 1):
+            card = _StageCard()
+            active = i == known["current"]
+            card.setStyleSheet(
+                "_StageCard { border: 2px solid palette(highlight); border-radius: 6px; }" if active
+                else "_StageCard { border: 1px solid palette(mid); border-radius: 6px; }"
+            )
+            line = QHBoxLayout(card)
+            line.setContentsMargins(8, 3, 4, 3)
+            num = QLabel(f"<b>{i}</b>")
+            num.setMinimumWidth(16)
+            spin = QSpinBox()
+            spin.setRange(lo, hi)
+            spin.setSingleStep(step)
+            spin.setSuffix(suffix)
+            spin.setValue(int(value))
+            spin.setMinimumWidth(90)
+            spin.editingFinished.connect(lambda i=i, spin=spin: spin.value() != known["values"][i - 1] and ctx.invoke(item["set"], {"stage": i, "value": spin.value()}))
+            star = QToolButton()
+            star.setAutoRaise(True)
+            is_default = i == known["default"]
+            star.setText("★" if is_default else "☆")
+            star.setToolTip("Default stage (the profile starts here)" if is_default else "Make this the default stage")
+            star.clicked.connect(lambda _=False, i=i: ctx.invoke(item["make_default"], {"stage": i}))
+            drop = _tool(_REMOVE_ICONS, "×", "Remove this stage")
+            drop.setEnabled(len(values) > 1)
+            drop.clicked.connect(lambda _=False, i=i: ctx.invoke(item["remove"], {"stage": i}))
+            line.addWidget(num)
+            line.addWidget(spin, 1)
+            line.addWidget(star)
+            line.addWidget(drop)
+            card.clicked = lambda i=i: i != known["current"] and ctx.invoke(item["select"], {"stage": i})
+            card.setToolTip("Active stage" if active else "Click to switch to this stage")
+            col.addWidget(card)
+        add = QPushButton("Add stage")
+        if icon := theme_icon(_ADD_ICONS):
+            add.setIcon(icon)
+        add.setEnabled(len(values) < int(item.get("max_items", 5)))
+        add.clicked.connect(lambda: ctx.invoke(item["add"], {}))
+        col.addWidget(add, 0, Qt.AlignmentFlag.AlignLeft)
+
+    def update(key):
+        def set_(v):
+            v = list(v) if key == "values" and isinstance(v, list) else v
+            if known[key] != v:  # a rebuild would drop a value being typed
+                known[key] = v
+                rebuild()
+
+        return set_
+
+    ctx.watch(item.get("state"), update("values"))
+    ctx.watch(item.get("current"), update("current"))
+    ctx.watch(item.get("default"), update("default"))
+    return host
+
+
+# Widgets that live in their own modules register themselves on import.
+from borochid.gui import binding_editor  # noqa: E402,F401

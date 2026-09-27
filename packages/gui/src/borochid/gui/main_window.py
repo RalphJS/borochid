@@ -47,6 +47,7 @@ from borochid.common.rpc import PROTOCOL_VERSION
 from borochid.gui.client import ServiceClient
 from borochid.gui.icons import FADED_OPACITY, Pictures, battery_icon, battery_text, device_icon, usable
 from borochid.gui.packagekit import PackageInstaller
+from borochid.gui.profiles import ProfileSelector
 from borochid.gui.widgets import IconText, PanelContext, build_compact, build_form, theme_icon
 
 STATUS_TEXT = {
@@ -549,32 +550,24 @@ class MainWindow(QMainWindow):
         self.home = QStackedWidget()
         self.home.addWidget(self._empty_page())
         self.home.addWidget(self.grid)
-        home_page = QWidget()
-        home_col = QVBoxLayout(home_page)
-        home_col.setContentsMargins(0, 0, 0, 0)
-        home_col.setSpacing(0)
-        home_col.addLayout(self._actions())
-        home_col.addWidget(self.home, 1)
-
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        back = QToolButton()
-        back.setIcon(QIcon.fromTheme("go-previous"))
-        back.setText("All devices")
-        back.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        back.setAutoRaise(True)
-        back.clicked.connect(self._go_home)
         device_page = QWidget()
         col = QVBoxLayout(device_page)
-        col.setContentsMargins(8, 8, 8, 0)
-        col.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        col.setContentsMargins(8, 0, 8, 0)
         col.addWidget(self.scroll, 1)
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(home_page)
+        self.pages.addWidget(self.home)
         self.pages.addWidget(device_page)
-        self.setCentralWidget(self.pages)
+        central = QWidget()
+        central_col = QVBoxLayout(central)
+        central_col.setContentsMargins(0, 0, 0, 0)
+        central_col.setSpacing(0)
+        central_col.addLayout(self._top_bar())
+        central_col.addWidget(self.pages, 1)
+        self.setCentralWidget(central)
         for keys in (QKeySequence.StandardKey.Back, QKeySequence(Qt.Key.Key_Escape)):
             QShortcut(keys, self, activated=self._go_home)
 
@@ -601,6 +594,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.statusBar().showMessage(f"Connected to service {info['version']}", 3000)
+        self.profile_selector.refresh()
         store = info.get("image_store")
         self.pictures.store = Path(store) if store and Path(store).is_absolute() else None
         self.empty.setText("No devices connected.\nPlug one in, or pair it in your Bluetooth settings.")
@@ -613,6 +607,7 @@ class MainWindow(QMainWindow):
         self.grid.clear()
         self._go_home()
         self._update_home()
+        self._update_profiles()
 
     def _on_notification(self, method: str, params: dict[str, Any]) -> None:
         if method in ("device.added", "device.changed"):
@@ -628,6 +623,8 @@ class MainWindow(QMainWindow):
             self._remove(params["uid"])
             if self._open_uid == params["uid"]:
                 self._go_home()
+        elif method == "profiles.changed":
+            self.profile_selector.show_state(params)
         elif method == "device.state":
             if self.panel and self.panel.uid == params["uid"]:
                 self.panel.ctx.apply(params["changes"])
@@ -670,21 +667,33 @@ class MainWindow(QMainWindow):
         item.setToolTip(f"{d['display_name']}\n{status_label(d)}")
         self.grid.sortItems()
         self._update_home()
+        self._update_profiles()
 
     def _remove(self, uid: str) -> None:
         self.devices.pop(uid, None)
         if item := self._item(uid):
             self.grid.takeItem(self.grid.row(item))
         self._update_home()
+        self._update_profiles()
 
     def _update_home(self) -> None:
         self.home.setCurrentIndex(1 if self.grid.count() else 0)
 
-    def _actions(self) -> QHBoxLayout:
-        """Small icon buttons at the top right of the device grid."""
+    def _top_bar(self) -> QHBoxLayout:
+        """Shared by both pages: "All devices" on the left (device page); on
+        the right the home page's small icon buttons, then the profile
+        switcher at the far right."""
         row = QHBoxLayout()
-        row.setContentsMargins(12, 6, 12, 0)
+        row.setContentsMargins(8, 6, 12, 0)
         row.setSpacing(2)
+        self.back = QToolButton()
+        self.back.setIcon(QIcon.fromTheme("go-previous"))
+        self.back.setText("All devices")
+        self.back.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.back.setAutoRaise(True)
+        self.back.clicked.connect(self._go_home)
+        self.back.hide()
+        row.addWidget(self.back)
         row.addStretch(1)
 
         def button(icon: str, tip: str) -> QToolButton:
@@ -701,7 +710,24 @@ class MainWindow(QMainWindow):
         self.show_unsupported = button("view-hidden", "Show devices Borochid can't configure")
         self.show_unsupported.setCheckable(True)
         self.show_unsupported.toggled.connect(self._on_show_unsupported)
+        self.home_actions = [refresh, self.show_unsupported]
+        # Rightmost; only while a device that supports profiles is connected.
+        row.addSpacing(8)
+        self.profile_selector = ProfileSelector(self.client)
+        self.profile_selector.failed.connect(lambda message: self.statusBar().showMessage(message, 5000))
+        self.profile_selector.hide()
+        row.addWidget(self.profile_selector)
         return row
+
+    def _update_profiles(self) -> None:
+        """Home: while any connected device supports profiles. A device's
+        page: only if that device does, since switching can't affect it otherwise."""
+        uid = getattr(self, "_open_uid", None)
+        if uid is not None:
+            shown = bool(self.devices.get(uid, {}).get("profiles"))
+        else:
+            shown = any(d.get("profiles") for d in self.devices.values())
+        self.profile_selector.setVisible(shown)
 
     def _on_show_unsupported(self, on: bool) -> None:
         self.show_unsupported.setIcon(QIcon.fromTheme("view-visible" if on else "view-hidden"))
@@ -731,6 +757,10 @@ class MainWindow(QMainWindow):
         self._open_uid = uid
         self.scroll.setWidget(QWidget())  # don't flash the previous device while loading
         self.pages.setCurrentIndex(1)
+        self.back.show()
+        for b in self.home_actions:
+            b.hide()
+        self._update_profiles()
         self._show(uid)
 
     def _open_current(self) -> None:
@@ -742,6 +772,10 @@ class MainWindow(QMainWindow):
         self.panel = None
         self.grid.clearSelection()
         self.pages.setCurrentIndex(0)
+        self.back.hide()
+        for b in self.home_actions:
+            b.show()
+        self._update_profiles()
 
     def _show(self, uid: str) -> None:
         def render(detail, error):

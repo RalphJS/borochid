@@ -7,6 +7,7 @@ from typing import Any
 
 from borochid.common.manifest import Manifest
 from borochid.service.channels import Channel
+from borochid.service.profiles import Profile
 from borochid.service.settings import MemoryStore
 
 
@@ -23,7 +24,13 @@ class Driver(ABC):
     ``save_settings()`` after changing it. ``host`` exposes the service's host services
     (``host.audio`` ...) enabled by the manifest, so drivers never need to
     touch the host themselves. Driver plugins subclass this.
+
+    Drivers that keep settings per profile set ``supports_profiles``: the
+    service then calls ``use_profile()`` before ``start()`` and whenever the
+    user switches, renames or deletes profiles (see service/profiles.py).
     """
+
+    supports_profiles = False
 
     def __init__(
         self,
@@ -57,6 +64,13 @@ class Driver(ABC):
 
     async def stop(self) -> None:
         """Called before the channel is closed."""
+
+    async def use_profile(self, profile: Profile, known: set[str]) -> None:
+        """Make ``profile`` active. A profile the driver has no settings for
+        starts from its settings for ``profile.copy_of`` if it has those, else
+        from its defaults. Settings for ids not in ``known`` (deleted
+        profiles) should be dropped. Before ``start()`` nothing is applied
+        yet; afterwards the device should switch at once."""
 
     @abstractmethod
     def on_data(self, data: bytes) -> None: ...

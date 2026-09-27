@@ -355,3 +355,36 @@ def test_unavailable_device_is_announced_and_says_so(tmp_path, examples):
         await manager.shutdown()
 
     asyncio.run(go())
+
+
+
+def test_profile_switches_reach_every_device_that_supports_profiles(tmp_path, examples):
+    from borochid.common.models import Bus, DeviceIdentity
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
+        dev = manager.devices["usb:1"]
+        await dev.task
+        assert dev.summary()["profiles"] is False  # the declarative driver has none
+
+        seen = []
+
+        async def use_profile(profile, known):
+            seen.append((profile.name, profile.copy_of, sorted(known)))
+
+        dev.driver.supports_profiles = True
+        dev.driver.use_profile = use_profile
+        assert dev.summary()["profiles"] is True
+
+        gaming = manager.profiles.add("Gaming", duplicate=True)
+        await manager._profile_task
+        manager.profiles.remove("default")
+        await manager._profile_task
+        assert seen == [("Gaming", "default", ["default", gaming.id]), ("Gaming", None, [gaming.id])]
+        assert [m for m, _ in events].count("profiles.changed") == 2
+        await manager.shutdown()
+
+    asyncio.run(go())

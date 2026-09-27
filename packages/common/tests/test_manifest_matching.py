@@ -131,3 +131,38 @@ def test_display_name_matching_is_linear_on_hostile_input():
     for _ in range(1000):
         rule.apply("a " * 5000)
     assert time.perf_counter() - start < 1.0
+
+
+def test_key_codes_match_the_kernel():
+    ecodes = pytest.importorskip("evdev.ecodes")
+    from borochid.common.keys import CODES
+
+    assert {name: ecodes.ecodes[name] for name in CODES} == CODES
+
+
+def test_system_keys_are_never_allowed():
+    from borochid.common.keys import ALLOWED
+
+    assert not ALLOWED & {"KEY_POWER", "KEY_SLEEP", "KEY_WAKEUP", "KEY_SUSPEND", "KEY_SCREENLOCK", "KEY_COFFEE"}
+
+
+def test_chord_labels():
+    from borochid.common.keys import chord_label
+
+    assert chord_label(["KEY_LEFTMETA", "KEY_LEFTSHIFT", "KEY_4"]) == "Super+Shift+4"
+    assert chord_label(["KEY_LEFTCTRL", "KEY_PAGEUP"]) == "Ctrl+Page Up"
+
+
+def test_every_key_is_in_exactly_one_picker_group():
+    from borochid.common.keys import ALLOWED, GROUPS, MODIFIERS
+
+    listed = [k for _, keys in GROUPS for k in keys]
+    assert len(listed) == len(set(listed))
+    assert set(listed) == {k for k in ALLOWED if k.startswith("KEY_") and k not in MODIFIERS}
+
+
+def test_friendly_labels():
+    from borochid.common.keys import label
+
+    assert (label("KEY_SYSRQ"), label("KEY_KPPLUS"), label("KEY_F13")) == ("Print", "Keypad +", "F13")
+
