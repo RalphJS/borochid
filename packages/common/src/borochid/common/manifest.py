@@ -39,7 +39,7 @@ DRIVER_PACKAGE_RE = re.compile(r"^borochid-driver-[a-z0-9][a-z0-9-]*$")
 # from the desktop icon theme by category, so packages never carry images.
 # Unknown values read as "other", so a newer package still loads here.
 CATEGORIES = frozenset(
-    {"headset", "headphones", "speaker", "microphone", "keyboard", "keypad", "mouse", "gamepad", "tablet", "webcam", "other"}
+    {"headset", "headphones", "speaker", "microphone", "keyboard", "keypad", "mouse", "gamepad", "tablet", "webcam", "receiver", "other"}
 )
 
 

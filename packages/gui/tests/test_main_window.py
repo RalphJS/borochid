@@ -44,6 +44,7 @@ class FakeClient(QObject):
             "device.get": lambda: {**self.devices[params["uid"]], "ui": UI, "state": {"brightness": 7, "battery": 80}},
             "profiles.list": lambda: self.profiles,
             "profiles.select": lambda: {**self.profiles, "active": params["id"]},
+            "device.set_hidden": lambda: {**self.devices[params["uid"]], "hidden": params["hidden"]},
         }.get(method, lambda: {})()
         if callback:
             callback(result, None)
@@ -155,13 +156,13 @@ def test_a_group_can_ask_for_the_status_column():
     assert not _is_status({"widget": "group", "children": [{"widget": "readout"}]})
 
 
-def test_show_unsupported_toggle_reloads_the_list(app):
+def test_show_hidden_toggle_reloads_the_list(app):
     client = FakeClient([summary("usb:1", "Acme")])
     win = MainWindow(client)
     client.connected.emit()
-    win.show_unsupported.click()
+    win.show_hidden.click()
     assert client.calls[-1] == ("devices.list", {"include_unsupported": True})
-    assert "Hide" in win.show_unsupported.toolTip()
+    assert "Hide" in win.show_hidden.toolTip()
 
 
 def test_battery_updates_in_place(app):
@@ -446,3 +447,22 @@ def test_a_device_on_two_connections_gets_one_card_with_its_connection(app):
     assert win.grid.count() == 1 and win.grid.item(0).data(Qt.ItemDataRole.UserRole) == "usb:1-4"
     win.grid.itemDoubleClicked.emit(win.grid.item(0))
     assert win.panel.connection.toolTip() == "Wireless"  # (no icon theme in tests, so no icon to show)
+
+
+def test_hidden_devices_are_left_out_until_asked_for_and_the_card_menu_hides_them(app):
+    client = FakeClient([summary("usb:1-2", "Dongle", category="receiver", hidden=True), summary("usb:1-3", "Headset")])
+    win = MainWindow(client)
+    client.connected.emit()
+    assert names(win) == ["Headset"]
+    win.show_hidden.click()
+    assert sorted(names(win)) == ["Dongle", "Headset"]
+    assert "Hidden" in win._item("usb:1-2").toolTip()
+    win.show_hidden.click()
+
+    item = win._item("usb:1-3")
+    win._card_menu(win.grid.visualItemRect(item).center())
+    menu = win.grid.findChildren(QtWidgets.QMenu)[-1]
+    assert [a.text() for a in menu.actions()] == ["Open", "Hide"]
+    menu.actions()[1].trigger()
+    assert client.calls[-1] == ("device.set_hidden", {"uid": "usb:1-3", "hidden": True})
+    assert names(win) == [] and "eye button" in win.statusBar().currentMessage()

@@ -125,6 +125,14 @@ class RpcServer:
         except Exception as e:
             raise rpc.RpcError(rpc.DEVICE_ERROR, str(e)) from e
 
+    async def rpc_device_set_hidden(self, uid: str, hidden: bool) -> dict[str, Any]:
+        """Hidden devices stay listed with ``"hidden": true``; clients leave
+        them out unless asked to show them."""
+        try:
+            return self.manager.set_hidden(uid, bool(hidden)).summary()
+        except KeyError:
+            raise rpc.RpcError(rpc.INVALID_PARAMS, f"no device {uid}") from None
+
     async def rpc_device_retry(self, uid: str | None = None) -> dict[str, int]:
         """Called by clients after installing a driver package."""
         return {"retried": self.manager.retry(uid)}

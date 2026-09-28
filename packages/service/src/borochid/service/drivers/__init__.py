@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from borochid.common.manifest import Manifest
-from borochid.service.channels import Channel
+from borochid.service.channels import Channel, PairedChannel
 from borochid.service.profiles import Profile
 from borochid.service.settings import MemoryStore
 
@@ -59,6 +59,9 @@ class Driver(ABC):
         self.device_id: str | None = None
         self.passive = False
         self.on_identify: Callable[[str], None] | None = None  # set by the service
+        # Set by the service: see pair() and unpair().
+        self.on_pair: Callable[..., PairedChannel | None] | None = None
+        self.on_unpair: Callable[[str], None] | None = None
 
     def save_settings(self) -> None:
         if not self.passive:  # the connection in use owns the settings
@@ -86,6 +89,22 @@ class Driver(ABC):
         """``settings`` were replaced (the device's own settings found, or
         another connection changed them): drivers that keep state derived
         from them rebuild it here."""
+
+    def pair(self, slot: str, *, name: str = "", pid: int | None = None, shared: Any = None) -> PairedChannel | None:
+        """A receiver's driver announces the device behind it, when the
+        receiver's kernel driver doesn't create one (it does for Logitech
+        receivers). The service shows it as a device of its own, uid
+        ``<receiver uid>/<slot>``, matched by package rules with ``"paired":
+        true``; ``name`` and ``pid`` default to the receiver's. The returned
+        channel writes through this one; hand the device its input with
+        ``deliver()``. Announcing a slot again replaces the device."""
+        return self.on_pair(slot, name, pid, shared) if self.on_pair is not None else None
+
+    def unpair(self, slot: str) -> None:
+        """The device behind the receiver is gone (switched off, out of
+        range). The service also removes it when the receiver goes."""
+        if self.on_unpair is not None:
+            self.on_unpair(slot)
 
     def publish(self, changes: dict[str, Any]) -> None:
         changes = {k: v for k, v in changes.items() if self.state.get(k, object()) != v}

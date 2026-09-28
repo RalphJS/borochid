@@ -95,6 +95,31 @@ opens only its own hidraw node, never the receiver's, which carries the
 traffic of every device paired to it (keyboards included). The receiver is
 reported too, as an ordinary USB device.
 
+Some receivers carry their device's traffic on their own node, with no
+kernel device for it (a Corsair headset dongle). The receiver's driver then
+announces the device itself, `Driver.pair(slot)`, while it answers, and
+`Driver.unpair(slot)` when it stops. The service shows it as a device of
+its own, `<receiver uid>/<slot>`, whose channel writes through the
+receiver's (`PairedChannel`; the receiver's driver hands it its input).
+It goes when the receiver goes, before the receiver's driver stops, so it
+can still hand the device back to its firmware.
+
+Either way, a device behind a receiver matches rules with `"paired": true`
+and the receiver itself rules with `"paired": false`, so two packages can
+tell a dongle from the headset behind it when both report the dongle's
+USB IDs.
+
+## Hiding devices
+
+A device the user doesn't need to see (a receiver, say) can be hidden from
+its card's menu in the GUI. The service keeps the choice
+(`hidden-devices.json` in the data directory) by the device's ID if it has
+one, so every connection of it follows; else by its USB serial, which
+survives a dongle re-enumerating as another product; else by its port.
+Hidden devices stay in `devices.list` with `"hidden": true`. The GUI leaves
+them out unless the eye button (which also shows devices Borochid can't
+configure) is on, and their menu shows them again.
+
 ## One device, several connections
 
 A device can reach the computer more than one way: a keyboard through its
@@ -191,7 +216,7 @@ plugin). Key sections:
   reported name is shown.
 * `category`: what kind of device it is (`headset`, `headphones`,
   `speaker`, `microphone`, `keyboard`, `keypad`, `mouse`, `gamepad`,
-  `tablet`, `webcam`, `other`). The GUI shows the matching icon from the
+  `tablet`, `webcam`, `receiver`, `other`). The GUI shows the matching icon from the
   desktop's icon theme when the package has no picture. Unknown values read
   as `other`. A `keyboard` gets a card two columns wide on the home grid,
   with its picture kept at its own (wide) aspect ratio.
@@ -210,8 +235,11 @@ plugin). Key sections:
   The most specific rule wins. A rule with `"channel": null` recognises a
   device mode that has nothing to talk to (a dongle whose headset is off):
   the driver runs, but nothing is opened. `"connection"` says how a device
-  matched by the rule is connected, `wireless` (receiver or dongle),
-  `cable` or `bluetooth` (implied for BLE), and the GUI shows it as an icon.
+  matched by the rule is connected, `wireless` (through a receiver or
+  dongle), `cable`, `usb` (plugged straight in, like a dongle itself) or
+  `bluetooth` (implied for BLE), and the GUI shows it as an icon.
+  `"paired": true` only matches a device behind a receiver, `false` only
+  the receiver or a device on its own (see above).
 * `channel`: `{"type": "hid", "interface": 1, "report_size": 32}`, `serial`
   (`baudrate`), `libusb` (`in_endpoint`/`out_endpoint`), `ble`
   (`notify`/`write` characteristic UUIDs).
@@ -291,7 +319,8 @@ there already runs as the user).
 Newline-delimited JSON-RPC 2.0 at `$XDG_RUNTIME_DIR/borochid.sock`.
 
 Methods: `service.info` (returns `version`, `protocol`), `devices.list {include_unsupported}`,
-`device.get {uid}`, `device.invoke {uid, action, params}`, `device.retry {uid?}`,
+`device.get {uid}`, `device.invoke {uid, action, params}`, `device.set_hidden {uid, hidden}`,
+`device.retry {uid?}`,
 `registry.refresh`, `profiles.list`, `profiles.select {id}`,
 `profiles.add {name, duplicate}`, `profiles.rename {id, name}`, `profiles.remove {id}`.
 Notifications: `device.added`, `device.changed`, `device.removed`,

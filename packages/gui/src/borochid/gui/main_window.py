@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -685,6 +686,8 @@ class MainWindow(QMainWindow):
         # itemActivated: with KDE's single-click setting, that fires on any click.
         self.grid.itemDoubleClicked.connect(lambda item: self._open(item.data(Qt.ItemDataRole.UserRole)))
         delegate.edit_requested.connect(lambda index: self._open(index.data(Qt.ItemDataRole.UserRole)))
+        self.grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.grid.customContextMenuRequested.connect(self._card_menu)
         for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             QShortcut(QKeySequence(key), self.grid, activated=self._open_current,
                       context=Qt.ShortcutContext.WidgetShortcut)
@@ -759,7 +762,7 @@ class MainWindow(QMainWindow):
             self._upsert(params)
             if self._open_uid == params["uid"] and method == "device.changed":
                 if params["uid"] not in self.devices:
-                    self._go_home()  # hidden now (became unsupported)
+                    self._go_home()  # not shown now (hidden, or became unsupported)
                 elif self.panel and self.panel.status == params["status"]:
                     self.panel.update_summary(params)  # battery, status line
                 else:
@@ -788,7 +791,7 @@ class MainWindow(QMainWindow):
                 self._go_home()
             self._update_home()
 
-        self.client.call("devices.list", {"include_unsupported": self.show_unsupported.isChecked()}, fill)
+        self.client.call("devices.list", {"include_unsupported": self.show_hidden.isChecked()}, fill)
 
     def _item(self, uid: str) -> QListWidgetItem | None:
         for i in range(self.grid.count()):
@@ -797,7 +800,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _upsert(self, d: dict[str, Any]) -> None:
-        if d["status"] == "unsupported" and not self.show_unsupported.isChecked():
+        if (d["status"] == "unsupported" or d.get("hidden")) and not self.show_hidden.isChecked():
             self._remove(d["uid"])
             return
         if d.get("shadowed"):  # the same device on another connection is the one shown
@@ -815,7 +818,7 @@ class MainWindow(QMainWindow):
         item.setIcon(device_icon(d, TileDelegate.picture_box(wide) if wide else self.ICON_SIZE, self.pictures.get(d)))
         item.setData(BATTERY_ROLE, d.get("battery") if usable(d) else None)
         item.setData(CONNECTION_ROLE, d.get("connection"))
-        item.setToolTip(f"{d['display_name']}\n{status_label(d)}")
+        item.setToolTip(f"{d['display_name']}\n{status_label(d)}" + ("\nHidden" if d.get("hidden") else ""))
         self.grid.sortItems()
         self._update_home()
         self._update_profiles()
@@ -858,10 +861,10 @@ class MainWindow(QMainWindow):
 
         refresh = button("view-refresh", "Refresh: look up packages for your devices again")
         refresh.clicked.connect(self._refresh_registry)
-        self.show_unsupported = button("view-hidden", "Show devices Borochid can't configure")
-        self.show_unsupported.setCheckable(True)
-        self.show_unsupported.toggled.connect(self._on_show_unsupported)
-        self.home_actions = [refresh, self.show_unsupported]
+        self.show_hidden = button("view-hidden", self.SHOW_HIDDEN_TIP)
+        self.show_hidden.setCheckable(True)
+        self.show_hidden.toggled.connect(self._on_show_hidden)
+        self.home_actions = [refresh, self.show_hidden]
         # Rightmost; only while a device that supports profiles is connected.
         row.addSpacing(8)
         self.profile_selector = ProfileSelector(self.client)
@@ -880,12 +883,36 @@ class MainWindow(QMainWindow):
             shown = any(d.get("profiles") for d in self.devices.values())
         self.profile_selector.setVisible(shown)
 
-    def _on_show_unsupported(self, on: bool) -> None:
-        self.show_unsupported.setIcon(QIcon.fromTheme("view-visible" if on else "view-hidden"))
-        self.show_unsupported.setToolTip(
-            "Hide devices Borochid can't configure" if on else "Show devices Borochid can't configure"
-        )
+    SHOW_HIDDEN_TIP = "Show hidden devices and devices Borochid can't configure"
+
+    def _on_show_hidden(self, on: bool) -> None:
+        self.show_hidden.setIcon(QIcon.fromTheme("view-visible" if on else "view-hidden"))
+        self.show_hidden.setToolTip(self.SHOW_HIDDEN_TIP.replace("Show", "Hide", 1) if on else self.SHOW_HIDDEN_TIP)
         self._reload()
+
+    def _card_menu(self, pos) -> None:
+        item = self.grid.itemAt(pos)
+        if item is None:
+            return
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        hidden = bool(self.devices.get(uid, {}).get("hidden"))
+        menu = QMenu(self.grid)
+        menu.addAction(QIcon.fromTheme("document-edit"), "Open", lambda: self._open(uid))
+        menu.addAction(QIcon.fromTheme("view-visible" if hidden else "view-hidden"),
+                       "Show on the home page" if hidden else "Hide", lambda: self._set_hidden(uid, not hidden))
+        menu.popup(self.grid.viewport().mapToGlobal(pos))
+
+    def _set_hidden(self, uid: str, hidden: bool) -> None:
+        def done(summary, error):
+            if error:
+                self.statusBar().showMessage(f"Couldn't change the device: {error['message']}", 5000)
+                return
+            self._upsert(summary)
+            if hidden and not self.show_hidden.isChecked():
+                self.statusBar().showMessage(
+                    f"{summary['display_name']} hidden. The eye button above shows hidden devices.", 5000)
+
+        self.client.call("device.set_hidden", {"uid": uid, "hidden": hidden}, done)
 
     def _empty_page(self) -> QWidget:
         host = QWidget()
