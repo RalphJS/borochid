@@ -11,7 +11,7 @@ from PyQt6 import QtCore  # noqa: E402
 from PyQt6.QtCore import QObject, Qt, pyqtSignal  # noqa: E402
 
 from borochid.common.rpc import PROTOCOL_VERSION  # noqa: E402
-from borochid.gui.main_window import BATTERY_ROLE, MainWindow  # noqa: E402
+from borochid.gui.main_window import BATTERY_ROLE, CONNECTION_ROLE, WIDE_ROLE, DeviceGrid, MainWindow  # noqa: E402
 
 UI = [
     {"widget": "readout", "label": "Battery", "state": "battery", "suffix": "%"},
@@ -47,11 +47,6 @@ class FakeClient(QObject):
         }.get(method, lambda: {})()
         if callback:
             callback(result, None)
-
-
-@pytest.fixture
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 def names(win):
@@ -169,8 +164,8 @@ def test_show_unsupported_toggle_reloads_the_list(app):
     assert "Hide" in win.show_unsupported.toolTip()
 
 
-def test_battery_updates_in_place_and_refresh_calls_the_package_action(app):
-    battery = {"level": 40, "charging": False, "refresh": "refresh_battery"}
+def test_battery_updates_in_place(app):
+    battery = {"level": 40, "charging": False}
     client = FakeClient([summary("usb:1", "Acme", battery=battery)])
     win = MainWindow(client)
     client.connected.emit()
@@ -183,18 +178,12 @@ def test_battery_updates_in_place_and_refresh_calls_the_package_action(app):
     assert win.panel is panel  # same page: sliders being dragged are not reset
     assert panel.battery.text.text() == "90%, charging"
 
-    panel.refresh_battery.click()
-    assert client.calls[-1] == ("device.invoke", {"uid": "usb:1", "action": "refresh_battery", "params": {}})
-
-    client.notification.emit("device.changed", summary("usb:1", "Acme", battery={**battery, "refresh": None}))
-    assert not panel.refresh_battery.isEnabled()  # e.g. headset switched off
-
 
 def test_hovering_the_tile_battery_shows_the_percentage(app):
     from PyQt6.QtCore import QEvent, QPoint
     from PyQt6.QtGui import QHelpEvent
 
-    battery = {"level": 87, "charging": True, "refresh": None}
+    battery = {"level": 87, "charging": True}
     client = FakeClient([summary("usb:1", "Acme", battery=battery)])
     win = MainWindow(client)
     client.connected.emit()
@@ -273,7 +262,7 @@ def test_groups_become_icon_sections_and_the_choice_is_remembered(app, monkeypat
 
 
 def test_an_unavailable_device_fades_hides_battery_and_disables_settings(app):
-    battery = {"level": 60, "charging": False, "refresh": "refresh_battery"}
+    battery = {"level": 60, "charging": False}
     client = FakeClient([summary("usb:1", "Acme", battery=battery)])
     win = MainWindow(client)
     client.connected.emit()
@@ -290,7 +279,7 @@ def test_an_unavailable_device_fades_hides_battery_and_disables_settings(app):
     off = summary("usb:1", "Acme", battery=battery, available=False, status_text="Headset off")
     client.notification.emit("device.changed", off)
     assert win.panel is panel  # updated in place
-    assert not panel.battery.isVisibleTo(panel) and not panel.refresh_battery.isVisibleTo(panel)
+    assert not panel.battery.isVisibleTo(panel)
     assert not panel.settings_host.isEnabled() and panel.settings_host.graphicsEffect() is not None
     assert opacity() < bright
     assert win.grid.item(0).data(BATTERY_ROLE) is None  # no battery on the home card either
@@ -383,3 +372,77 @@ def test_profile_switcher_hides_on_pages_of_devices_without_profiles(app):
     assert win.profile_selector.isVisible()
     win._go_home()
     assert win.profile_selector.isVisible()
+
+
+def test_keyboards_get_a_card_two_columns_wide(app):
+    from PyQt6.QtCore import QRect
+
+    from borochid.gui.main_window import WIDE_ROLE, TileDelegate
+
+    client = FakeClient([summary("usb:1", "A Mouse", category="mouse"), summary("usb:2", "B Keyboard", category="keyboard"),
+                         summary("usb:3", "C Mouse", category="mouse"), summary("usb:4", "D Mouse", category="mouse")])
+    win = MainWindow(client)
+    client.connected.emit()
+    win.resize(1200, 760)
+    win.show()
+    app.processEvents()
+    rects = [win.grid.visualItemRect(win.grid.item(i)) for i in range(win.grid.count())]
+    assert win.grid.item(1).data(WIDE_ROLE) and not win.grid.item(0).data(WIDE_ROLE)
+    assert rects[1].width() == TileDelegate.WIDE_CARD.width() and rects[0].width() == TileDelegate.CARD.width()
+    # The wide card covers exactly two columns: the cards under it line up with its edges.
+    below = [r for r in rects if r.top() > rects[1].bottom()]
+    if below:
+        assert rects[1].left() in {r.left() for r in rects}
+    assert all(r.height() == TileDelegate.CARD.height() for r in rects)
+
+    option = QtWidgets.QStyleOptionViewItem()
+    option.rect = QRect(0, 0, TileDelegate.WIDE_CARD.width(), TileDelegate.WIDE_CARD.height())
+    picture = TileDelegate().picture_rect(option)
+    assert picture.width() > 2 * picture.height()  # a wide picture keeps its aspect ratio
+
+
+def test_a_wide_picture_fills_a_wide_card(app, tmp_path, png):
+    from borochid.common import images
+    from borochid.gui.main_window import TileDelegate
+
+    digest = images.store(tmp_path, png(700, 200, (0, 255, 0, 255)))
+    client = FakeClient([summary("usb:1", "Keyboard", category="keyboard", image=digest)])
+    client.image_store = str(tmp_path)
+    win = MainWindow(client)
+    client.connected.emit()
+    size = win.grid.item(0).icon().availableSizes()[0]
+    assert size.width() == TileDelegate.picture_box(True).width() and size.height() < TileDelegate.PICTURE
+
+
+@pytest.mark.parametrize(("wide", "columns", "used"), [
+    ([False, False, True], 3, 2),  # the keyboard wraps: two columns in use
+    ([False, False, True], 4, 4),
+    ([False, False, False], 2, 2),  # a short last row doesn't narrow the grid
+    ([True, False], 5, 3),
+    ([True], 1, 1),
+])
+def test_grid_centres_the_columns_its_cards_use(app, wide, columns, used):
+    grid = DeviceGrid()
+    for w in wide:
+        item = QtWidgets.QListWidgetItem("x")
+        item.setData(WIDE_ROLE, w)
+        grid.addItem(item)
+    assert grid._used_columns(columns) == used
+
+
+def test_a_device_on_two_connections_gets_one_card_with_its_connection(app):
+    client = FakeClient([
+        summary("usb:1-3", "Keyboard", category="keyboard", connection="cable", device_id="9454DCB7", shadowed=False),
+        summary("usb:1-4", "Keyboard", category="keyboard", connection="wireless", device_id="9454DCB7", shadowed=True),
+    ])
+    win = MainWindow(client)
+    client.connected.emit()
+    assert win.grid.count() == 1 and win.grid.item(0).data(CONNECTION_ROLE) == "cable"
+
+    # The cable is pulled: the receiver's connection is the one in use now.
+    client.notification.emit("device.changed", summary("usb:1-4", "Keyboard", category="keyboard",
+                                                       connection="wireless", device_id="9454DCB7", shadowed=False))
+    client.notification.emit("device.removed", {"uid": "usb:1-3"})
+    assert win.grid.count() == 1 and win.grid.item(0).data(Qt.ItemDataRole.UserRole) == "usb:1-4"
+    win.grid.itemDoubleClicked.emit(win.grid.item(0))
+    assert win.panel.connection.toolTip() == "Wireless"  # (no icon theme in tests, so no icon to show)

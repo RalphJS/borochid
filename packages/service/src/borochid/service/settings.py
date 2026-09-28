@@ -1,9 +1,12 @@
 """Per-device settings that drivers persist across reconnects and restarts.
 
 Stored as ``<data_dir>/device-settings/<package id>/<device key>.<namespace>.json``
-(the driver and each host service get their own namespace), where
-the device key is the serial number when the device reports one (so settings
-follow the device between ports) and the detector uid otherwise.
+(the driver and each host service get their own namespace). The device key
+starts as the USB serial number when there is one, the detector uid
+otherwise. Once the driver reads the device's own ID from it (``rekey``,
+through ``Driver.identify``), the key is ``id-<that ID>``: one set of
+settings however the device is connected (receiver or cable) and on
+whichever port.
 """
 
 from __future__ import annotations
@@ -20,10 +23,31 @@ from borochid.common.models import DeviceIdentity
 log = logging.getLogger(__name__)
 
 
+def _safe(key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", key)
+
+
 class SettingsStore:
     def __init__(self, root: Path, package_id: str, ident: DeviceIdentity, namespace: str = "driver"):
-        key = re.sub(r"[^A-Za-z0-9._-]", "_", ident.serial or ident.uid)
-        self.path = root / "device-settings" / package_id / f"{key}.{namespace}.json"
+        self.namespace = namespace
+        self.path = root / "device-settings" / package_id / f"{_safe(ident.serial or ident.uid)}.{namespace}.json"
+
+    def rekey(self, device_id: str) -> bool:
+        """Keep the settings under the device's own ID from now on. The first
+        time, what was kept so far moves there; after that, what is there
+        wins. True when that means different settings than were loaded."""
+        new = self.path.with_name(f"id-{_safe(device_id)}.{self.namespace}.json")
+        if new == self.path:
+            return False
+        old, self.path = self.path, new
+        if new.exists():
+            # The device's own settings win; what this connection kept
+            # before it knew the ID would never be read again.
+            old.unlink(missing_ok=True)
+            return True
+        if old.exists():
+            os.replace(old, new)  # one set of settings: no copy left behind
+        return False
 
     def load(self) -> dict[str, Any]:
         try:
@@ -52,3 +76,6 @@ class MemoryStore:
 
     def save(self, settings: dict[str, Any]) -> None:
         self.data = dict(settings)
+
+    def rekey(self, device_id: str) -> bool:
+        return False

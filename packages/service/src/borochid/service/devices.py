@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ from typing import Any
 
 from borochid.common import images
 from borochid.common.manifest import Manifest, display_name, state_key
-from borochid.common.models import DeviceIdentity, DeviceStatus
+from borochid.common.models import Bus, DeviceIdentity, DeviceStatus
 from borochid.service import plugins
 from borochid.service.channels import Channel, ChannelNotReady, NullChannel
 from borochid.service.drivers import Driver
@@ -63,6 +64,20 @@ class Device:
     # Pending removal while waiting to see whether the device comes back.
     removal: asyncio.TimerHandle | None = field(default=None, repr=False)
     teardown: asyncio.Task | None = field(default=None, repr=False)
+    # The device's own ID: from its driver (Driver.identify), or known ahead
+    # from an earlier connection with the same USB serial.
+    device_id: str | None = None
+    # Another connection to the same device (same device ID) is the one in
+    # use: clients hide this one (see DeviceManager._resolve_twins).
+    shadowed: bool = False
+
+    def connection(self) -> str | None:
+        """"wireless", "cable" or "bluetooth": from the matching package rule,
+        or the bus."""
+        if self.ident.bus is Bus.BLE:
+            return "bluetooth"
+        rule = self.manifest.best_rule(self.ident) if self.manifest else None
+        return rule.connection if rule else None
 
     def summary(self) -> dict[str, Any]:
         pkg = None
@@ -88,6 +103,11 @@ class Device:
             # Follows the service-wide profiles (profiles.list).
             "profiles": bool(self.driver and self.driver.supports_profiles and self.status is DeviceStatus.READY),
             "available": self.available(),
+            "connection": self.connection(),
+            # The device's own ID, once its driver read it; connections
+            # sharing one are the same device.
+            "device_id": self.device_id,
+            "shadowed": self.shadowed,
             "error": self.error,
             "needs": self.needs,
             "package": pkg,
@@ -121,8 +141,8 @@ class Device:
         return spec is None or self.status is not DeviceStatus.READY or spec(self.state())
 
     def battery(self) -> dict[str, Any] | None:
-        """``{"level": 0-100 or None, "charging": bool, "refresh": action or
-        None}`` for packages with a ``battery`` section, else None."""
+        """``{"level": 0-100 or None, "charging": bool}`` for packages with a
+        ``battery`` section, else None."""
         spec = self.manifest.battery if self.manifest else None
         if spec is None or self.status is not DeviceStatus.READY:
             return None
@@ -132,16 +152,15 @@ class Device:
             level = None
         else:
             level = max(0, min(100, round(level)))
-        can_refresh = spec.refresh and (not spec.refresh_if or bool(state.get(spec.refresh_if)))
         return {
             "level": level,
             "charging": bool(spec.charging and state.get(spec.charging)),
-            "refresh": spec.refresh if can_refresh else None,
         }
 
     def detail(self) -> dict[str, Any]:
         d = self.summary()
         d["ui"] = self.manifest.ui if self.manifest else []
+        d["layouts"] = self.manifest.ui_layouts() if self.manifest else {}
         d["actions"] = {
             name: {"params": spec.get("params", {})}
             for name, spec in (self.manifest.raw.get("actions", {}) if self.manifest else {}).items()
@@ -181,6 +200,12 @@ class DeviceManager:
         self.devices: dict[str, Device] = {}
         self.profiles = ProfileStore(self.data_dir / "profiles.json", self._profiles_changed)
         self._profile_task: asyncio.Task | None = None
+        # USB serial -> device ID, learned when a connection with that serial
+        # identifies, so it is known the moment that connection appears again
+        # (no second card while its driver sets up). Serials only: a port may
+        # hold another device next time.
+        self._known_ids_path = self.data_dir / "device-ids.json"
+        self._known_ids: dict[str, str] = self._load_known_ids()
 
     # -- DeviceSink ------------------------------------------------------------
 
@@ -202,6 +227,9 @@ class DeviceManager:
         dev = Device(ident)
         self.devices[ident.uid] = dev
         log.info("detected %s%s %s", ident.uid, ids, ident.name)
+        if known := self._known_ids.get(self._serial_key(ident) or ""):
+            dev.device_id = known
+            self._resolve_twins(known)  # hidden from the start if another connection is in use
         self.emit("device.added", dev.summary())
         dev.task = asyncio.create_task(self._bring_up(dev), name=f"bring-up {ident.uid}")
 
@@ -223,6 +251,8 @@ class DeviceManager:
             del self.devices[dev.ident.uid]
             log.info("removed %s", dev.ident.uid)
             self.emit("device.removed", {"uid": dev.ident.uid})
+            if dev.device_id:
+                self._resolve_twins(dev.device_id)
 
     def device_changed(self, uid: str) -> None:
         dev = self.devices.get(uid)
@@ -240,6 +270,63 @@ class DeviceManager:
         if status is not DeviceStatus.NEEDS_DRIVER:
             dev.needs = None
         self.emit("device.changed", dev.summary())
+        if dev.device_id:
+            self._resolve_twins(dev.device_id)
+
+    # -- one device, several connections ---------------------------------------
+
+    @staticmethod
+    def _serial_key(ident: DeviceIdentity) -> str | None:
+        if not ident.serial or ident.vid is None or ident.pid is None:
+            return None
+        return f"{ident.bus}:{ident.vid:04x}:{ident.pid:04x}:{ident.serial}"
+
+    def _load_known_ids(self) -> dict[str, str]:
+        try:
+            raw = json.loads(self._known_ids_path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(raw, dict) else {}
+
+    def _identified(self, dev: Device, device_id: str) -> None:
+        dev.device_id = device_id
+        if (key := self._serial_key(dev.ident)) and self._known_ids.get(key) != device_id:
+            self._known_ids[key] = device_id
+            try:
+                self._known_ids_path.parent.mkdir(parents=True, exist_ok=True)
+                self._known_ids_path.write_text(json.dumps(self._known_ids, indent=1, sort_keys=True))
+            except OSError as e:
+                log.warning("can't remember device IDs: %s", e)
+        self.emit("device.changed", dev.summary())
+        self._resolve_twins(device_id)
+
+    _PREFERRED = {"cable": 0, "wireless": 1, "bluetooth": 2}
+
+    def _resolve_twins(self, device_id: str) -> None:
+        """Connections to one device (receiver and cable, say): the one in
+        use shows and owns the settings, the others are hidden and passive.
+        In use: ready and available first, then cable over wireless over
+        Bluetooth. One that becomes active reloads the settings, which its
+        twin may have changed meanwhile."""
+        twins = [d for d in self.devices.values() if d.device_id == device_id]
+        if not twins:
+            return
+        # A connection that just dropped (kept a moment in case it comes back)
+        # is never the one in use while another is still there.
+        active = min(twins, key=lambda d: (d.removal is not None, d.status is not DeviceStatus.READY, not d.available(),
+                                           self._PREFERRED.get(d.connection() or "", 3), d.ident.uid))
+        for d in twins:
+            shadowed = d is not active
+            if d.driver is not None:  # (none yet while it is being brought up: see _bring_up)
+                if d.driver.passive and not shadowed:
+                    task = asyncio.get_running_loop().create_task(d.driver.reload_settings())
+                    task.add_done_callback(lambda t, uid=d.ident.uid: t.cancelled() or t.exception() is None
+                                           or log.warning("%s: reloading settings failed: %s", uid, t.exception()))
+                d.driver.passive = shadowed
+            if d.shadowed != shadowed:
+                d.shadowed = shadowed
+                log.info("%s: %s", d.ident.uid, "another connection is in use" if shadowed else "in use")
+                self.emit("device.changed", d.summary())
 
     async def _bring_up(self, dev: Device) -> None:
         dev.changed_during_bring_up = False
@@ -319,6 +406,8 @@ class DeviceManager:
             self.emit("device.state", {"uid": uid, "changes": changes})
             if summary_keys & changes.keys() and dev.status is DeviceStatus.READY:
                 self.emit("device.changed", dev.summary())
+                if dev.device_id:  # e.g. asleep: its twin may take over
+                    self._resolve_twins(dev.device_id)
 
         host = Host(
             audio=self._audio_service(manifest, ident, publish),
@@ -326,6 +415,8 @@ class DeviceManager:
             input=HostInput() if "input" in manifest.raw else None,
         )
         driver = cls(manifest, dev.package_dir, channel, publish, SettingsStore(self.data_dir, manifest.id, ident), host)
+        driver.on_identify = lambda device_id: self._identified(dev, device_id)
+        driver.passive = dev.shadowed  # known ahead to be a second connection: not the settings' owner yet
         channel.on_data = driver.on_data
         channel.on_closed = lambda exc: self._on_channel_closed(dev, exc)
         dev.channel, dev.driver, dev.host = channel, driver, host

@@ -38,6 +38,25 @@ ATTENTION = frozenset({"needs_driver", "blocked", "error"})
 INACTIVE = frozenset({"detected", "resolving", "connecting", "disconnected", "unsupported"})
 
 
+# How a device is connected ("connection" in its summary): theme icon
+# names, first one the theme has, and the words for a tooltip.
+CONNECTIONS = {
+    "wireless": (("network-wireless-symbolic", "network-wireless"), "Wireless"),
+    "cable": (("drive-removable-media-usb-symbolic", "drive-removable-media-usb", "network-wired-symbolic"), "USB cable"),
+    "bluetooth": (("preferences-system-bluetooth", "bluetooth-active-symbolic", "bluetooth"), "Bluetooth"),
+}
+
+
+def connection_icon(connection: Any) -> QIcon | None:
+    spec = CONNECTIONS.get(connection) if isinstance(connection, str) else None
+    return _theme(spec[0]) if spec else None
+
+
+def connection_text(connection: Any) -> str:
+    spec = CONNECTIONS.get(connection) if isinstance(connection, str) else None
+    return f"Connected by {spec[1].lower()}" if connection == "cable" else (spec[1] if spec else "")
+
+
 def _theme(names: tuple[str, ...]) -> QIcon | None:
     for name in names:
         if QIcon.hasThemeIcon(name):
@@ -149,17 +168,19 @@ def _faded(pixmap: QPixmap) -> QPixmap:
     return out
 
 
-def device_icon(device: dict[str, Any], size: int, picture: QPixmap | None = None) -> QIcon:
+def device_icon(device: dict[str, Any], size: int | QSize, picture: QPixmap | None = None) -> QIcon:
     """The device's icon, faded while it can't be used, and badged when it
-    needs attention."""
+    needs attention. ``size`` is a square side, or a box for wide pictures
+    (which keep their aspect ratio inside it)."""
     status = device.get("status")
-    pixmap = (QIcon(picture) if picture else base_icon(device)).pixmap(QSize(size, size))
+    box = size if isinstance(size, QSize) else QSize(size, size)
+    pixmap = (QIcon(picture) if picture else base_icon(device)).pixmap(box)
     if not usable(device):
         pixmap = _faded(pixmap)
     if status in ATTENTION and (badge := _theme(("dialog-warning", "emblem-important"))):
         pixmap = QPixmap(pixmap)
         painter = QPainter(pixmap)
-        b = min(size * 2 // 5, 48)  # a badge, not a second icon
+        b = min(min(box.width(), box.height()) * 2 // 5, 48)  # a badge, not a second icon
         logical = pixmap.deviceIndependentSize()  # HiDPI pixmaps are larger than `size`
         painter.drawPixmap(QPointF(logical.width() - b, logical.height() - b), badge.pixmap(b, b))
         painter.end()

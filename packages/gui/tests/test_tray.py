@@ -9,11 +9,6 @@ from PyQt6.QtGui import QIcon  # noqa: E402
 from borochid.gui.tray import Tray  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def test_menu_has_open_and_quit(app):
     tray = Tray(QtWidgets.QMainWindow(), QIcon())
     assert [a.text() for a in tray.contextMenu().actions() if not a.isSeparator()] == ["Open Borochid", "Quit"]

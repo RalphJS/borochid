@@ -40,6 +40,7 @@ def test_sim_device_end_to_end(tmp_path, examples):
         uid = devs[0]["uid"]
         detail = (await call(2, "device.get", uid=uid))["result"]
         assert detail["ui"] and "set_brightness" in detail["actions"]
+        assert detail["layouts"] == {}  # no ui item names a layout section
 
         assert "result" in await call(3, "device.invoke", uid=uid, action="set_brightness", params={"value": 42})
         # The sim echoes the report; the declarative input rule turns it into state.
@@ -312,7 +313,7 @@ def test_battery_is_part_of_the_summary_and_announced_when_it_changes(tmp_path, 
         manager.device_added(DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
         dev = manager.devices["usb:1"]
         await dev.task
-        assert dev.summary()["battery"] == {"level": None, "charging": False, "refresh": None}
+        assert dev.summary()["battery"] == {"level": None, "charging": False}
 
         events.clear()
         dev.driver.on_data(bytes.fromhex("0257"))  # the example's battery report: 0x57 = 87%
@@ -386,5 +387,105 @@ def test_profile_switches_reach_every_device_that_supports_profiles(tmp_path, ex
         assert seen == [("Gaming", "default", ["default", gaming.id]), ("Gaming", None, [gaming.id])]
         assert [m for m, _ in events].count("profiles.changed") == 2
         await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_settings_follow_the_device_id(tmp_path):
+    from borochid.common.models import Bus, DeviceIdentity
+    from borochid.service.settings import SettingsStore
+
+    on_port = SettingsStore(tmp_path, "pkg", DeviceIdentity(Bus.USB, "usb:1-3"))
+    on_port.save({"brightness": 40})
+    assert on_port.rekey("9454DCB7") is False  # the first time, what was kept moves over
+    assert on_port.load() == {"brightness": 40} and not (tmp_path / "device-settings/pkg/usb_1-3.driver.json").exists()
+
+    on_cable = SettingsStore(tmp_path, "pkg", DeviceIdentity(Bus.USB, "usb:2-1", serial="XYZ"))
+    on_cable.save({"brightness": 100})
+    assert on_cable.rekey("9454DCB7") is True  # after that, the device's own settings win
+    assert on_cable.load() == {"brightness": 40}
+    assert [f.name for f in (tmp_path / "device-settings/pkg").iterdir()] == ["id-9454DCB7.driver.json"]
+
+
+def test_one_device_on_two_connections_shows_once_and_the_one_in_use_owns_settings(tmp_path, examples):
+    import shutil
+
+    from borochid.common.models import Bus, DeviceIdentity
+
+    pkgs = tmp_path / "pkgs"
+    shutil.copytree(examples / "acme.macropad", pkgs / "acme.macropad")
+    path = pkgs / "acme.macropad" / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["available"] = {"state": "brightness", "values": [128]}  # stand-in for a link state
+    manifest["match"][0]["connection"] = "wireless"
+    path.write_text(json.dumps(manifest))
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=pkgs, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+        for uid in ("usb:1", "usb:2"):
+            manager.device_added(DeviceIdentity(Bus.USB, uid, vid=0x1209, pid=0xB0C1, attrs={"simulated": True}))
+        one, two = manager.devices["usb:1"], manager.devices["usb:2"]
+        await one.task
+        await two.task
+        assert one.summary()["connection"] == "wireless"
+
+        await one.driver.identify("unit-7")
+        await two.driver.identify("unit-7")
+        assert (one.shadowed, two.shadowed) == (False, True)
+        assert two.driver.passive and not one.driver.passive
+        two.driver.settings["x"] = 1
+        two.driver.save_settings()  # passive: not written
+        one.driver.settings["x"] = 2
+        one.driver.save_settings()
+
+        one.driver.on_data(bytes.fromhex("0340"))  # the first connection becomes unusable
+        await asyncio.sleep(0.01)
+        assert (one.shadowed, two.shadowed) == (True, False)
+        assert two.driver.settings["x"] == 2  # took over with what its twin saved
+        summaries = [p for m, p in events if m == "device.changed" and p["uid"] == "usb:2"]
+        assert summaries[-1]["shadowed"] is False and summaries[-1]["device_id"] == "unit-7"
+
+        manager.device_removed("usb:2")  # unplugged: kept a moment in case it comes back
+        await asyncio.sleep(0.01)
+        assert (one.shadowed, two.shadowed) == (False, True)  # the other connection shows meanwhile
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_a_known_serial_is_the_same_device_from_the_moment_it_appears(tmp_path, examples):
+    from borochid.common.models import Bus, DeviceIdentity
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+
+        def plug(uid, serial=None):
+            manager.device_added(DeviceIdentity(Bus.USB, uid, vid=0x1209, pid=0xB0C1, serial=serial,
+                                                attrs={"simulated": True}))
+            return manager.devices[uid]
+
+        wireless = plug("usb:1")
+        await wireless.task
+        await wireless.driver.identify("unit-7")
+        cable = plug("usb:2", serial="SN42")  # first time: unknown until its driver says so
+        await cable.task
+        await cable.driver.identify("unit-7")
+        manager.device_removed("usb:2")
+        manager._forget(cable)
+
+        events.clear()
+        cable = plug("usb:2", serial="SN42")  # plugged in again: known at once
+        added = [p for m, p in events if m == "device.added"]
+        assert added[-1]["device_id"] == "unit-7" and added[-1]["shadowed"] is True  # no second card, not even briefly
+        await cable.task
+        assert cable.driver.passive
+        await manager.shutdown()
+
+        again = DeviceManager(Registry(cfg), lambda m, p: None)  # remembered across restarts
+        assert again._known_ids == {"usb:1209:b0c1:SN42": "unit-7"}
 
     asyncio.run(go())

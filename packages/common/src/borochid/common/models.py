@@ -65,6 +65,9 @@ class DeviceIdentity:
         }
 
 
+CONNECTIONS = ("wireless", "cable", "bluetooth")
+
+
 def parse_int(value: int | str) -> int:
     """Accept ints or strings like "0x046d" in manifests and index files."""
     return value if isinstance(value, int) else int(value, 0)
@@ -84,10 +87,16 @@ class MatchRule:
     channel: bool = True
     # Picture for the models this rule matches, overriding the package's.
     image: str | None = None
+    # How a device matched by this rule is connected: "wireless" (a
+    # receiver or dongle), "cable" or "bluetooth". Shown as an icon.
+    connection: str | None = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> MatchRule:
         pr = d.get("pid_range")
+        connection = d.get("connection")
+        if connection is not None and connection not in CONNECTIONS:
+            raise ValueError(f"connection must be one of {', '.join(CONNECTIONS)}")
         return cls(
             bus=Bus(d["bus"]),
             vid=parse_int(d["vid"]) if "vid" in d else None,
@@ -98,6 +107,7 @@ class MatchRule:
             name_prefix=d.get("name_prefix"),
             channel=d.get("channel", True) is not None,
             image=d.get("image"),
+            connection=connection,
         )
 
     def score(self, ident: DeviceIdentity) -> int:

@@ -166,3 +166,14 @@ def test_friendly_labels():
 
     assert (label("KEY_SYSRQ"), label("KEY_KPPLUS"), label("KEY_F13")) == ("Print", "Keypad +", "F13")
 
+
+
+def test_ui_layouts_are_the_sections_ui_items_name():
+    keys = {"keys": [{"id": "a", "x": 0, "y": 0}]}
+    d = {"id": "a.b", "version": "1.0.0", "match": [{"bus": "usb", "vid": 1}], "channel": {"type": "hid"},
+         "keyboard": keys, "secret": {"x": 1}, "name": "not a dict",
+         "ui": [{"widget": "group", "children": [{"widget": "keyboard", "layout": "keyboard"},
+                                                  {"widget": "keyboard", "layout": "keyboard"}]},
+                {"widget": "keyboard", "layout": "name"}, {"widget": "keyboard", "layout": "missing"},
+                {"widget": "keyboard", "layout": {"keys": []}}]}
+    assert Manifest.from_json(d).ui_layouts() == {"keyboard": keys}

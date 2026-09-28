@@ -58,6 +58,12 @@ class Host:
         for svc in self.services.values():
             await svc.start()
 
+    async def identify(self, device_id: str) -> None:
+        """Host services with per-device settings follow the device's own ID too."""
+        for svc in self.services.values():
+            if hasattr(svc, "identify"):
+                await svc.identify(device_id)
+
     async def stop(self) -> None:
         for name, svc in self.services.items():
             with contextlib.suppress(Exception):
