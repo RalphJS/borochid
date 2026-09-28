@@ -16,6 +16,12 @@ safety re-read.
 
 State: ``power.level`` (0-100 or None), ``power.charging``, ``power.online``
 (the kernel can reach the device). It offers no actions.
+
+The kernel's own ``online`` is narrower than that for hid-logitech-hidpp:
+it means "running on its battery", so a mouse charging from a wall charger
+while still in use through its receiver reads offline. A device that has
+lost its link reads ``Unknown``, never ``Charging``, so charging counts as
+reachable too.
 """
 
 from __future__ import annotations
@@ -89,7 +95,10 @@ class HostPower:
             changes["power.level"] = int(level) if level and level.isdigit() and int(level) <= 100 else None
             changes["power.charging"] = status in ("Charging", "Full")
             # Batteries without an "online" attribute are reachable when they report a level.
-            changes["power.online"] = online == "1" if online is not None else changes["power.level"] is not None
+            if online is None:
+                changes["power.online"] = changes["power.level"] is not None
+            else:
+                changes["power.online"] = online == "1" or changes["power.charging"]
         changes = {k: v for k, v in changes.items() if self.state.get(k) != v}
         if changes:
             self.state.update(changes)

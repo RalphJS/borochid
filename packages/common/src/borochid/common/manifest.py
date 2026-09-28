@@ -242,6 +242,11 @@ class Manifest:
     image: str | None = None
     battery: BatterySpec | None = None
     available: AvailabilitySpec | None = None
+    # Per match rule, in order: its own ``battery`` and ``available``, for a
+    # connection that reports them differently (a mouse whose battery the
+    # kernel reads through the receiver but not on the cable). None: the
+    # package's.
+    rule_specs: tuple[tuple[BatterySpec | None, AvailabilitySpec | None], ...] = ()
 
     @property
     def ui(self) -> list[dict[str, Any]]:
@@ -268,6 +273,30 @@ class Manifest:
         scored = [(r.score(ident), r) for r in self.match]
         score, rule = max(scored, key=lambda sr: sr[0], default=(0, None))
         return rule if score else None
+
+    def _rule_spec(self, ident: DeviceIdentity, which: int) -> Any:
+        rule = self.best_rule(ident)
+        for r, specs in zip(self.match, self.rule_specs):
+            if r is rule and specs[which] is not None:
+                return specs[which]
+        return (self.battery, self.available)[which]
+
+    def battery_for(self, ident: DeviceIdentity) -> BatterySpec | None:
+        """The battery spec for this connection: its rule's, else the package's."""
+        return self._rule_spec(ident, 0)
+
+    def available_for(self, ident: DeviceIdentity) -> AvailabilitySpec | None:
+        """The availability spec for this connection: its rule's, else the package's."""
+        return self._rule_spec(ident, 1)
+
+    @property
+    def state_keys(self) -> frozenset[str]:
+        """State keys any battery or availability spec reads."""
+        keys: set[str] = set()
+        for battery, available in ((self.battery, self.available), *self.rule_specs):
+            keys |= battery.keys if battery else set()
+            keys |= {available.state} if available else set()
+        return frozenset(keys)
 
     def image_for(self, ident: DeviceIdentity) -> str | None:
         """Package-relative path of the device's picture, if the package has one."""
@@ -298,13 +327,20 @@ class Manifest:
                 raise ManifestError("category must be a string")
             battery = BatterySpec.from_json(d["battery"]) if "battery" in d else None
             available = AvailabilitySpec.from_json(d["available"]) if "available" in d else None
+            rule_specs = tuple(
+                (
+                    BatterySpec.from_json(r["battery"]) if "battery" in r else None,
+                    AvailabilitySpec.from_json(r["available"]) if "available" in r else None,
+                )
+                for r in d["match"]
+            )
             image = _image_path(d.get("image"))
             for rule in rules:
                 _image_path(rule.image)
         except KeyError as e:
             raise ManifestError(f"missing required field {e.args[0]!r}") from None
         category = category if category in CATEGORIES else "other"
-        return cls(pkg_id, version, d.get("name", pkg_id), rules, channel, driver, d, names, category, image, battery, available)
+        return cls(pkg_id, version, d.get("name", pkg_id), rules, channel, driver, d, names, category, image, battery, available, rule_specs)
 
     @classmethod
     def load(cls, package_dir: Path) -> Manifest:
