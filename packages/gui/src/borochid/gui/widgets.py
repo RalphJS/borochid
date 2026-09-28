@@ -5,7 +5,8 @@ Each schema item names a ``widget`` type. Builders are registered with
 Common keys: ``label``, ``state`` (state key the widget displays),
 ``action`` + ``param`` (what the widget invokes when the user changes it),
 ``enabled_if`` (state key; the widget is disabled while it is falsy, or
-while it is truthy with a leading ``!``).
+while it is truthy with a leading ``!``), ``visible_if`` (the same, but
+the widget is hidden).
 
 ``tooltip`` sets hover text on any widget.
 
@@ -45,8 +46,15 @@ Invoke = Callable[[str, dict[str, Any]], None]
 
 
 class PanelContext:
-    def __init__(self, invoke: Invoke):
+    """``layouts`` are the package sections that items reference by name
+    (``"layout": "keyboard"``), as the service sends them with the UI."""
+
+    def __init__(self, invoke: Invoke, layouts: dict[str, Any] | None = None):
         self.invoke = invoke
+        self.layouts = layouts or {}
+        # (action, id) -> opens that item's editor; lets one widget open
+        # another's (a keyboard key opening its G-key binding).
+        self.editors: dict[tuple[str, str], Callable[[], None]] = {}
         self._watchers: dict[str, list[Callable[[Any], None]]] = defaultdict(list)
 
     def watch(self, key: str | None, setter: Callable[[Any], None]) -> None:
@@ -91,7 +99,16 @@ def _build(item: dict[str, Any], ctx: PanelContext) -> QWidget:
         negate = key.startswith("!")
         w.setEnabled(negate)
         ctx.watch(key.lstrip("!"), lambda v, w=w: w.setEnabled(bool(v) != negate))
+    _visible_if(item.get("visible_if"), w, ctx)
     return w
+
+
+def _visible_if(key: Any, w: QWidget, ctx: PanelContext) -> None:
+    if not isinstance(key, str) or not key.lstrip("!"):
+        return
+    negate = key.startswith("!")
+    w.setVisible(negate)
+    ctx.watch(key.lstrip("!"), lambda v, w=w: w.setVisible(bool(v) != negate))
 
 
 def build_compact(items: list[dict[str, Any]], ctx: PanelContext, parent: QWidget | None = None) -> QWidget:
@@ -128,6 +145,21 @@ def build_form(items: list[dict[str, Any]], ctx: PanelContext, parent: QWidget |
             form.addRow(w)
         else:
             form.addRow(item.get("label", ""), w)
+            if isinstance(key := item.get("visible_if"), str) and key.lstrip("!"):
+                # The whole row, label included, comes and goes.
+                negate = key.startswith("!")
+                ctx.watch(key.lstrip("!"), lambda v, w=w: form.setRowVisible(w, bool(v) != negate))
+    return host
+
+
+def build_column(items: list[dict[str, Any]], ctx: PanelContext, parent: QWidget | None = None) -> QWidget:
+    """Items stacked without labels. Unlike a form it keeps a keyboard's
+    height-for-width, so nothing pads the space under it."""
+    host = QWidget(parent)
+    col = QVBoxLayout(host)
+    col.setContentsMargins(0, 0, 0, 0)
+    for item in items:
+        col.addWidget(_build(item, ctx))
     return host
 
 
@@ -333,10 +365,21 @@ def _row(item, ctx):
     row.setSpacing(8)
     stretchy = False
     for child in item.get("children", []):
-        if child.get("label"):
-            row.addWidget(QLabel(child["label"]))
         is_slider = child.get("widget") == "slider"
         stretchy |= is_slider
+        if child.get("label") and child.get("visible_if"):
+            # The label comes and goes with its widget.
+            pair = QWidget()
+            pair_row = QHBoxLayout(pair)
+            pair_row.setContentsMargins(0, 0, 0, 0)
+            pair_row.setSpacing(row.spacing())
+            pair_row.addWidget(QLabel(child["label"]))
+            pair_row.addWidget(_build({**child, "visible_if": None}, ctx), 1)
+            _visible_if(child["visible_if"], pair, ctx)
+            row.addWidget(pair, 1 if is_slider else 0)
+            continue
+        if child.get("label"):
+            row.addWidget(QLabel(child["label"]))
         row.addWidget(_build(child, ctx), 1 if is_slider else 0)
     if not stretchy:
         row.addStretch(1)
@@ -461,3 +504,4 @@ def _stages(item, ctx):
 
 # Widgets that live in their own modules register themselves on import.
 from borochid.gui import binding_editor  # noqa: E402,F401
+from borochid.gui import keyboard_widget  # noqa: E402,F401

@@ -17,7 +17,10 @@ from pathlib import Path
 
 MAX_BYTES = 256 * 1024
 # Shown at up to 192 logical pixels (the home grid); 384 covers 2x displays.
+# Wide devices (keyboards) get a double-width tile, so the long side may be
+# twice that; the pixel count stays within 768x384.
 MAX_SIDE = 384
+MAX_LONG_SIDE = 2 * MAX_SIDE
 _SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -33,8 +36,8 @@ def check_png(data: bytes) -> tuple[int, int]:
     if len(data) < 24 or data[:8] != _SIGNATURE or data[12:16] != b"IHDR":
         raise ImageError("image must be a PNG file")
     width, height = struct.unpack(">II", data[16:24])
-    if not (0 < width <= MAX_SIDE and 0 < height <= MAX_SIDE):
-        raise ImageError(f"image is {width}x{height}, the limit is {MAX_SIDE}x{MAX_SIDE}")
+    if not (0 < min(width, height) <= MAX_SIDE and 0 < max(width, height) <= MAX_LONG_SIDE):
+        raise ImageError(f"image is {width}x{height}, the limit is {MAX_SIDE}x{MAX_SIDE} ({MAX_LONG_SIDE}x{MAX_SIDE} for wide ones)")
     return width, height
 
 

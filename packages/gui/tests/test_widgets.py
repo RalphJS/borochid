@@ -10,11 +10,6 @@ QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
 from borochid.gui.widgets import PanelContext, build_form  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def test_state_updates_reach_widgets_without_echoing_to_device(app):
     sent = []
     ctx = PanelContext(lambda action, params: sent.append((action, params)))
@@ -259,3 +254,35 @@ def test_keys_the_desktop_keeps_can_be_chosen_from_the_menu(app):
     rec.toggles["KEY_LEFTMETA"].setChecked(True)
     print_screen.trigger()
     assert rec.chord() == ["KEY_LEFTMETA", "KEY_SYSRQ"]
+
+
+def test_visible_if_hides_a_widget_and_its_row_label(app):
+    ctx = PanelContext(lambda *_: None)
+    form = build_form(
+        [{"widget": "row", "label": "", "children": [
+            {"widget": "readout", "state": "name"},
+            {"widget": "readout", "label": "·", "state": "sub", "visible_if": "!x_mode"},
+            {"widget": "readout", "label": "·", "state": "x_mode", "visible_if": "x_mode"},
+        ]}],
+        ctx,
+    )
+    form.show()
+
+    def shown():
+        return [w.text() for w in form.findChildren(QtWidgets.QLabel) if w.isVisible() and w.text()]
+
+    ctx.apply({"name": "Default", "sub": 2, "x_mode": False})
+    assert shown() == ["Default", "·", "2"]
+    ctx.apply({"x_mode": True})
+    assert shown() == ["Default", "·", "True"]
+
+
+def test_visible_if_on_a_form_row_hides_its_label_too(app):
+    ctx = PanelContext(lambda *_: None)
+    form = build_form([{"widget": "toggle", "label": "M lights", "state": "a", "visible_if": "x_mode"}], ctx)
+    form.show()
+    label = next(w for w in form.findChildren(QtWidgets.QLabel) if w.text() == "M lights")
+    ctx.apply({"x_mode": False})
+    hidden = label.isVisible()
+    ctx.apply({"x_mode": True})
+    assert not hidden and label.isVisible()

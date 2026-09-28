@@ -8,11 +8,6 @@ QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
 from borochid.gui.icons import battery_icon, battery_text  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def app():
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-
-
 def _colours(battery):
     image = battery_icon(battery).pixmap(64, 64).toImage()
     return {image.pixelColor(x, y).name() for x in range(64) for y in range(64) if image.pixelColor(x, y).alpha() > 200}

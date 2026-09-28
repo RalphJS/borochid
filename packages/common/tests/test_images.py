@@ -11,8 +11,12 @@ BASE = {"id": "a.b", "version": "1.0.0", "channel": {"type": "hid"}}
 
 def test_check_png_bounds(png):
     assert images.check_png(png(384, 128)) == (384, 128)
+    assert images.check_png(png(768, 216)) == (768, 216)  # wide: a keyboard
+    assert images.check_png(png(200, 768)) == (200, 768)
     with pytest.raises(images.ImageError, match="limit is 384x384"):
-        images.check_png(png(385, 10))
+        images.check_png(png(769, 10))
+    with pytest.raises(images.ImageError, match="limit is 384x384"):
+        images.check_png(png(400, 400))  # only one side may exceed 384
     with pytest.raises(images.ImageError, match="must be a PNG"):
         images.check_png(b"GIF89a" + b"\0" * 40)
     with pytest.raises(images.ImageError, match="KiB"):
@@ -51,9 +55,9 @@ def test_image_paths_stay_inside_the_package(path):
 
 def test_battery_section():
     m = Manifest.from_json({**BASE, "match": [{"bus": "usb", "vid": 1}],
-                            "battery": {"level": "bat", "charging": "chg", "refresh": "poll", "refresh_if": "online"}})
-    assert m.battery.keys == {"bat", "chg", "online"} and m.battery.refresh == "poll"
-    for bad in ({}, {"level": 3}, {"level": "bat", "refresh": ["x"]}, "bat"):
+                            "battery": {"level": "bat", "charging": "chg"}})
+    assert m.battery.keys == {"bat", "chg"} and m.battery.charging == "chg"
+    for bad in ({}, {"level": 3}, {"level": "bat", "charging": ["x"]}, "bat"):
         with pytest.raises(ManifestError, match="battery"):
             Manifest.from_json({**BASE, "match": [{"bus": "usb", "vid": 1}], "battery": bad})
 

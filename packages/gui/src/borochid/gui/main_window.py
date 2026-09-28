@@ -45,10 +45,19 @@ from PyQt6.QtWidgets import (
 
 from borochid.common.rpc import PROTOCOL_VERSION
 from borochid.gui.client import ServiceClient
-from borochid.gui.icons import FADED_OPACITY, Pictures, battery_icon, battery_text, device_icon, usable
+from borochid.gui.icons import (
+    FADED_OPACITY,
+    Pictures,
+    battery_icon,
+    battery_text,
+    connection_icon,
+    connection_text,
+    device_icon,
+    usable,
+)
 from borochid.gui.packagekit import PackageInstaller
 from borochid.gui.profiles import ProfileSelector
-from borochid.gui.widgets import IconText, PanelContext, build_compact, build_form, theme_icon
+from borochid.gui.widgets import IconText, PanelContext, build_column, build_compact, build_form, theme_icon
 
 STATUS_TEXT = {
     "detected": "Detected",
@@ -177,6 +186,10 @@ class DevicePanel(QWidget):
 
     PICTURE_SIZE = 384
     STATUS_WIDTH = PICTURE_SIZE + 2 * 16 + 16  # picture, its margin, breathing room
+    # A wide device (a keyboard) shows its picture smaller: its settings (the
+    # lighting keyboard) need the width more than the picture does.
+    WIDE_PICTURE = QSize(288, 144)
+    WIDE_STATUS_WIDTH = WIDE_PICTURE.width() + 2 * 16 + 16
 
     def __init__(self, detail: dict[str, Any], client: ServiceClient, picture: QPixmap | None = None,
                  tab: int = 0, parent: QWidget | None = None):
@@ -185,13 +198,16 @@ class DevicePanel(QWidget):
         self.status = detail["status"]  # a change of status rebuilds the page
         self.tabs: SectionSwitcher | None = None
         self.settings_host: QWidget | None = None
+        self._staged: list[bool] = []  # per section: does its keyboard take the picture's place?
         self._picture = picture
         self.client = client
-        self.ctx = PanelContext(self._invoke)
+        self.wide = detail.get("category") in WIDE_CATEGORIES
+        self.ctx = PanelContext(self._invoke, detail.get("layouts") or {})
         ready = detail["status"] == "ready"
         ui = detail.get("ui", []) if ready else []
         readouts = [i for i in ui if _is_status(i)]
-        settings = [i for i in ui if not _is_status(i)]
+        header_items = [i for i in ui if i.get("section") == "header"]
+        settings = [i for i in ui if not _is_status(i) and i.get("section") != "header"]
 
         page = QVBoxLayout(self)
         page.setContentsMargins(24, 8, 16, 16)
@@ -202,15 +218,17 @@ class DevicePanel(QWidget):
         title = QLabel(f"<h1 style='margin:0'>{html.escape(detail['display_name'])}</h1>")
         title.setWordWrap(True)
         header.addWidget(title)
-        header.addLayout(self._status_line())
+        header.addLayout(self._status_line(header_items))
         page.addLayout(header)
-        row = QHBoxLayout()
+        row = self._row = QHBoxLayout()
         row.setSpacing(24)
         page.addLayout(row, 1)
 
         status_col = QVBoxLayout()
         status_col.setContentsMargins(0, 0, 0, 0)
         status_col.setSpacing(8)
+        if self.wide:  # a short picture or keyboard: centred beside the settings, not stuck to the top
+            status_col.addStretch(1)
         status_col.addLayout(self._identity(detail, picture))
         if readouts:
             status_col.addSpacing(8)
@@ -227,7 +245,7 @@ class DevicePanel(QWidget):
         status_col.addWidget(about, 0, Qt.AlignmentFlag.AlignRight)
         status_host = QWidget()
         status_host.setLayout(status_col)
-        status_host.setMinimumWidth(self.STATUS_WIDTH)
+        status_host.setMinimumWidth(self.WIDE_STATUS_WIDTH if self.wide else self.STATUS_WIDTH)
 
         settings_col = QVBoxLayout()
         settings_col.setSpacing(12)
@@ -248,9 +266,13 @@ class DevicePanel(QWidget):
         settings_col.addStretch(1)
 
         # Settings first (where the eye starts), the device itself on the right.
-        # Settings take under half the width; the picture's column gets the rest.
-        row.addLayout(settings_col, 45)
-        row.addWidget(status_host, 55)
+        # Settings take under half the width and the picture's column the rest,
+        # except on a wide device, whose settings get most of it (the column
+        # widths change with the section there: see _show_stage).
+        row.addLayout(settings_col, 70 if self.wide else 45)
+        row.addWidget(status_host, 30 if self.wide else 55)
+        if self.tabs is not None:
+            self._show_stage(self.tabs.currentIndex())
 
         if ready:
             self.ctx.apply(detail.get("state", {}))
@@ -263,23 +285,34 @@ class DevicePanel(QWidget):
         self.picture_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.picture_label.setContentsMargins(16, 16, 16, 16)  # room around the picture
         col.addWidget(self.picture_label)
+        # A wide device's keyboard editor takes the picture's place while its
+        # section is shown (see _settings).
+        # Pages shown one at a time in a plain layout rather than a
+        # QStackedWidget, which sizes to the keyboards' preferred width and
+        # leaves a gap under them (it ignores height-for-width).
+        self.stage = QWidget()
+        self._stage_col = QVBoxLayout(self.stage)
+        self._stage_col.setContentsMargins(0, 0, 0, 0)
+        self.stage.hide()
+        col.addWidget(self.stage)
         return col
 
-    def _status_line(self) -> QHBoxLayout:
-        """One line under the name: "Connected  [battery] 80%  [refresh]"."""
+    def _status_line(self, items: list[dict[str, Any]]) -> QHBoxLayout:
+        """One line under the name: "Connected  [battery] 80%  [connection]".
+        Items with ``"section": "header"`` (e.g. a subprofile selector) take
+        the status text's place while the device can be used."""
         line = QHBoxLayout()
         line.setSpacing(10)
         self.status_text = QLabel()
         line.addWidget(self.status_text)
+        self.header_items = build_column([{"widget": "row", "children": items}], self.ctx) if items else None
+        if self.header_items is not None:
+            line.addWidget(self.header_items)
         self.battery = IconText()
         self.battery.setToolTip("Battery")
         line.addWidget(self.battery)
-        self.refresh_battery = QToolButton()
-        self.refresh_battery.setIcon(QIcon.fromTheme("view-refresh"))
-        self.refresh_battery.setToolTip("Refresh battery")
-        self.refresh_battery.setAutoRaise(True)
-        self.refresh_battery.clicked.connect(self._on_refresh_battery)
-        line.addWidget(self.refresh_battery)
+        self.connection = IconText()  # wireless, cable or Bluetooth
+        line.addWidget(self.connection)
         line.addStretch(1)
         return line
 
@@ -287,27 +320,30 @@ class DevicePanel(QWidget):
         """Status line, battery, picture and whether settings can be used,
         updated in place (no page rebuild)."""
         self.status_text.setText(status_label(d))
-        size = self.PICTURE_SIZE
-        self.picture_label.setPixmap(device_icon(d, size, self._picture).pixmap(size, size))
-        if self.settings_host is not None:
-            self.settings_host.setEnabled(usable(d))
+        in_header = self.header_items is not None and usable(d)
+        self.status_text.setVisible(not in_header)
+        if self.header_items is not None:
+            self.header_items.setVisible(in_header)
+        size = self.WIDE_PICTURE if self.wide else QSize(self.PICTURE_SIZE, self.PICTURE_SIZE)
+        self.picture_label.setPixmap(device_icon(d, size, self._picture).pixmap(size))
+        for host in (self.settings_host, self.stage if self._staged else None):
+            if host is None:
+                continue
+            host.setEnabled(usable(d))
             # Faded like the picture: disabled colour swatches would otherwise look live.
             fade = None
             if not usable(d):
-                fade = QGraphicsOpacityEffect(self.settings_host)
+                fade = QGraphicsOpacityEffect(host)
                 fade.setOpacity(FADED_OPACITY + 0.15)
-            self.settings_host.setGraphicsEffect(fade)
+            host.setGraphicsEffect(fade)
         battery = d.get("battery") if usable(d) else None  # no reading from a headset that's off
         self.battery.setVisible(bool(battery))
         self.battery.set_icon(battery_icon(battery))
         self.battery.text.setText(battery_text(battery))
-        self._refresh_action = battery.get("refresh") if battery else None
-        self.refresh_battery.setVisible(bool(battery and "refresh" in battery))
-        self.refresh_battery.setEnabled(bool(self._refresh_action))
-
-    def _on_refresh_battery(self) -> None:
-        if self._refresh_action:
-            self._invoke(self._refresh_action, {})
+        link = connection_icon(d.get("connection"))
+        self.connection.setVisible(link is not None)
+        self.connection.set_icon(link)
+        self.connection.setToolTip(connection_text(d.get("connection")))
 
     def _settings(self, items: list[dict[str, Any]], tab: int) -> QWidget:
         """Settings split into sections, one per top-level group, picked with
@@ -324,12 +360,37 @@ class DevicePanel(QWidget):
             col.addWidget(build_form(loose, self.ctx))
         self.tabs = SectionSwitcher()
         for group in groups:
-            # The group's children, without its frame: the section is the frame.
-            self.tabs.add(build_form([{**group, "widget": "form"}], self.ctx),
-                          theme_icon(group.get("icon", "")), group.get("label", ""))
+            children = group.get("children", [])
+            # On a wide device a section's keyboard goes on the right, where
+            # it has room; the rest of the section stays here.
+            staged = [c for c in children if c.get("widget") == "keyboard"] if self.wide else []
+            rest = [c for c in children if c not in staged]
+            if staged and not rest:  # nothing else to set: say what the keyboard is for
+                section = self._note(" ".join(str(c["tooltip"]) for c in staged if c.get("tooltip")))
+            else:
+                # The group's children, without its frame: the section is the frame.
+                section = build_form([{**group, "widget": "form", "children": rest}], self.ctx)
+            self.tabs.add(section, theme_icon(group.get("icon", "")), group.get("label", ""))
+            page = build_column(staged, self.ctx) if staged else QWidget()
+            page.hide()
+            self._stage_col.addWidget(page)
+            self._staged.append(bool(staged))
+        self.tabs.currentChanged.connect(self._show_stage)
         self.tabs.setCurrentIndex(tab)
         col.addWidget(self.tabs)
         return host
+
+    def _show_stage(self, index: int) -> None:
+        """The section's keyboard in place of the picture, if it has one,
+        with most of the width; otherwise the picture and the usual widths."""
+        staged = 0 <= index < len(self._staged) and self._staged[index]
+        for i in range(self._stage_col.count()):
+            self._stage_col.itemAt(i).widget().setVisible(staged and i == index)
+        self.stage.setVisible(staged)
+        self.picture_label.setVisible(not staged)
+        if self.wide:
+            self._row.setStretch(0, 35 if staged else 70)
+            self._row.setStretch(1, 65 if staged else 30)
 
     def _copy_details(self, details: str) -> None:
         QApplication.clipboard().setText(details)
@@ -391,12 +452,19 @@ class DevicePanel(QWidget):
 
 
 BATTERY_ROLE = Qt.ItemDataRole.UserRole + 1
+CONNECTION_ROLE = Qt.ItemDataRole.UserRole + 3
+WIDE_ROLE = Qt.ItemDataRole.UserRole + 2
+# Devices whose pictures are wide get a card two columns wide on the home
+# grid (a full-size keyboard is about 3.5 times wider than it is tall).
+WIDE_CATEGORIES = frozenset({"keyboard"})
 
 
 class TileDelegate(QStyledItemDelegate):
     """Draws each device as a card: its name at the top left, the battery
     icon under the name (hover it for the percentage), the picture in the
-    middle, and an edit button in its own row at the bottom right."""
+    middle, and an edit button in its own row at the bottom right. A wide
+    card (``WIDE_ROLE``) spans two columns and its picture keeps its aspect
+    ratio across the card's width."""
 
     PAD = 12
     PICTURE = 192
@@ -404,6 +472,8 @@ class TileDelegate(QStyledItemDelegate):
     EDIT = QSize(28, 28)  # the edit button, square
     GAP = 4
     CARD = QSize(238, 304)  # pad, name, battery, picture, edit row, pad
+    SPACING = 16  # between cards
+    WIDE_CARD = QSize(2 * CARD.width() + SPACING, CARD.height())  # two columns and the gap between them
     RADIUS = 10
     EDIT_ICONS = ("document-edit-symbolic", "document-edit", "document-properties")
 
@@ -427,15 +497,29 @@ class TileDelegate(QStyledItemDelegate):
         name = self._name_rect(option)
         return QRect(name.left(), name.bottom() + 4, self.BATTERY_PX, self.BATTERY_PX)
 
+    def connection_rect(self, option: QStyleOptionViewItem, index) -> QRect:
+        """After the battery, or in its place when there is none."""
+        r = self.battery_rect(option)
+        shift = r.width() + 6 if battery_icon(index.data(BATTERY_ROLE)) else 0
+        return QRect(r.left() + shift, r.top(), r.height(), r.height())
+
     def picture_rect(self, option: QStyleOptionViewItem) -> QRect:
         r, top = option.rect, self.battery_rect(option).bottom() + self.GAP
         bottom = self.edit_rect(option).top() - self.GAP  # the edit row is the picture's floor
         area = QRect(r.left() + self.PAD, top, r.width() - 2 * self.PAD, bottom - top)
+        if r.width() > self.CARD.width():  # wide: the picture keeps its aspect ratio (QIcon.paint centres it)
+            height = min(self.PICTURE, area.height())
+            return QRect(area.left(), area.center().y() - height // 2 + 1, area.width(), height)
         side = min(self.PICTURE, area.width(), area.height())
         return QRect(area.center().x() - side // 2 + 1, area.center().y() - side // 2 + 1, side, side)
 
+    @classmethod
+    def picture_box(cls, wide: bool) -> QSize:
+        """The largest picture a card shows."""
+        return QSize(cls.WIDE_CARD.width() - 2 * cls.PAD, cls.PICTURE) if wide else QSize(cls.PICTURE, cls.PICTURE)
+
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
-        return self.CARD
+        return self.WIDE_CARD if index.data(WIDE_ROLE) else self.CARD
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         pal, state = option.palette, option.state
@@ -459,6 +543,8 @@ class TileDelegate(QStyledItemDelegate):
 
         if icon := battery_icon(index.data(BATTERY_ROLE)):
             icon.paint(painter, self.battery_rect(option))
+        if icon := connection_icon(index.data(CONNECTION_ROLE)):
+            icon.paint(painter, self.connection_rect(option, index))
         if isinstance(picture := index.data(Qt.ItemDataRole.DecorationRole), QIcon):
             picture.paint(painter, self.picture_rect(option))
         painter.restore()
@@ -498,10 +584,63 @@ class TileDelegate(QStyledItemDelegate):
         if battery and self.battery_rect(option).contains(event.pos()):
             QToolTip.showText(event.globalPos(), f"Battery {battery_text(battery)}", view)
             return True
+        connection = index.data(CONNECTION_ROLE)
+        if connection_icon(connection) and self.connection_rect(option, index).contains(event.pos()):
+            QToolTip.showText(event.globalPos(), connection_text(connection), view)
+            return True
         if self.edit_rect(option).contains(event.pos()):
             QToolTip.showText(event.globalPos(), "Settings", view)
             return True
         return super().helpEvent(event, view, option, index)
+
+
+class DeviceGrid(QListWidget):
+    """The home grid: the columns the cards use, centred in the window, with
+    the cards filling rows from the left (a short last row stays left)."""
+
+    PAD = 12  # around the cards
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        # The scrollbar coming or going changes the width without a resize.
+        self.verticalScrollBar().rangeChanged.connect(lambda *_: self._centre())
+        model = self.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.dataChanged, model.layoutChanged):
+            signal.connect(lambda *_: self._centre())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        self._centre()
+
+    def _used_columns(self, columns: int) -> int:
+        """How many of ``columns`` the cards fill, flowed left to right as
+        the view does (a wide card spans two)."""
+        widest = row = 0
+        for i in range(self.count()):
+            span = min(columns, 2 if self.item(i).data(WIDE_ROLE) else 1)
+            if row + span > columns:
+                row = 0
+            row += span
+            widest = max(widest, row)
+        return widest or columns
+
+    def _centre(self) -> None:
+        bar = self.verticalScrollBar()
+        room = self.width() - 2 * self.frameWidth() - (bar.sizeHint().width() if bar.isVisible() else 0) - 2 * self.PAD
+        # Icon mode puts the spacing before each card and once more at the
+        # end, and wraps unless it also has room for the scrollbar while that
+        # is hidden, plus a pixel (measured). That reserve is ours to give
+        # but not to show: the cards are centred without it.
+        s, cell = self.spacing(), TileDelegate.CARD.width() + self.spacing()
+        reserve = 1 + (0 if bar.isVisible() else bar.sizeHint().width())
+        columns = max(2, (room - s - reserve) // cell)  # a wide card spans two
+        # Only the columns in use: narrowing the view to them flows the cards
+        # into the same rows, since each row already fit in that many.
+        columns = self._used_columns(columns)
+        gap = max(0, room - (s + columns * cell))
+        left = self.PAD + gap // 2
+        right = max(0, self.PAD + gap - gap // 2 - reserve)
+        self.setViewportMargins(left, self.PAD, right, self.PAD)
 
 
 class MainWindow(QMainWindow):
@@ -522,20 +661,26 @@ class MainWindow(QMainWindow):
         self.pictures = Pictures()
         self._tab: dict[str, int] = {}  # uid -> the settings tab last shown
 
-        self.grid = QListWidget()
+        self.grid = DeviceGrid()
         self.grid.setViewMode(QListView.ViewMode.IconMode)
         self.grid.setMovement(QListView.Movement.Static)
         self.grid.setResizeMode(QListView.ResizeMode.Adjust)
         self.grid.setIconSize(QSize(self.ICON_SIZE, self.ICON_SIZE))
-        gap = 16
-        self.grid.setGridSize(TileDelegate.CARD + QSize(gap, gap))
+        # No fixed grid size: cards come in two widths (see TileDelegate), so
+        # the view flows them by their size hints with even spacing.
+        self.grid.setSpacing(TileDelegate.SPACING)
+        self.grid.setUniformItemSizes(False)
+        # Cards wrap, never scroll sideways; a wide card always fits.
+        self.grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.grid.setMinimumWidth(TileDelegate.WIDE_CARD.width() + 2 * TileDelegate.SPACING + 2 * 12 + 24)  # + padding, scrollbar
         delegate = TileDelegate(self.grid)
         self.grid.setItemDelegate(delegate)
         self.grid.setMouseTracking(True)  # hover highlight on the cards' edit buttons
         self.grid.setSortingEnabled(True)
         self.grid.setFrameShape(QFrame.Shape.NoFrame)
         # Same background as the window, so the grid and the actions row read as one page.
-        self.grid.setStyleSheet("QListWidget { background: palette(window); padding: 12px; }")
+        # (No stylesheet padding: DeviceGrid sets its own margins to centre the cards.)
+        self.grid.setStyleSheet("QListWidget { background: palette(window); }")
         # Double-click a card, click its edit button, or press Enter to open it. Not
         # itemActivated: with KDE's single-click setting, that fires on any click.
         self.grid.itemDoubleClicked.connect(lambda item: self._open(item.data(Qt.ItemDataRole.UserRole)))
@@ -655,6 +800,9 @@ class MainWindow(QMainWindow):
         if d["status"] == "unsupported" and not self.show_unsupported.isChecked():
             self._remove(d["uid"])
             return
+        if d.get("shadowed"):  # the same device on another connection is the one shown
+            self._remove(d["uid"])
+            return
         self.devices[d["uid"]] = d
         item = self._item(d["uid"])
         if item is None:
@@ -662,8 +810,11 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, d["uid"])
             self.grid.addItem(item)
         item.setText(d["display_name"])
-        item.setIcon(device_icon(d, self.ICON_SIZE, self.pictures.get(d)))
+        wide = d.get("category") in WIDE_CATEGORIES
+        item.setData(WIDE_ROLE, wide)
+        item.setIcon(device_icon(d, TileDelegate.picture_box(wide) if wide else self.ICON_SIZE, self.pictures.get(d)))
         item.setData(BATTERY_ROLE, d.get("battery") if usable(d) else None)
+        item.setData(CONNECTION_ROLE, d.get("connection"))
         item.setToolTip(f"{d['display_name']}\n{status_label(d)}")
         self.grid.sortItems()
         self._update_home()

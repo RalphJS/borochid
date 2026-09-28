@@ -167,31 +167,28 @@ class BatterySpec:
     """Which driver state holds the battery, so every client can show it the
     same way (a battery icon for the level, a bolt while charging)::
 
-        "battery": {"level": "battery", "charging": "charging",
-                    "refresh": "refresh_battery", "refresh_if": "online"}
+        "battery": {"level": "battery", "charging": "charging"}
 
-    ``level`` is a percentage. ``refresh`` names an action that asks the
-    device for a new reading, offered while ``refresh_if`` is truthy.
+    ``level`` is a percentage. Drivers keep it current themselves: there is
+    no refresh button.
     """
 
     level: str
     charging: str | None = None
-    refresh: str | None = None
-    refresh_if: str | None = None
 
     @classmethod
     def from_json(cls, d: Any) -> BatterySpec:
         if not isinstance(d, dict) or not isinstance(d.get("level"), str):
             raise ManifestError("battery.level must name a state key")
-        extra = {k: d.get(k) for k in ("charging", "refresh", "refresh_if")}
-        if any(v is not None and not isinstance(v, str) for v in extra.values()):
-            raise ManifestError("battery.charging, refresh and refresh_if must be strings")
-        return cls(d["level"], **extra)
+        charging = d.get("charging")
+        if charging is not None and not isinstance(charging, str):
+            raise ManifestError("battery.charging must be a string")
+        return cls(d["level"], charging)
 
     @property
     def keys(self) -> frozenset[str]:
         """State keys whose changes alter what clients show."""
-        return frozenset(k for k in (self.level, self.charging, self.refresh_if) if k)
+        return frozenset(k for k in (self.level, self.charging) if k)
 
 
 def state_key(value: Any) -> str:
@@ -249,6 +246,23 @@ class Manifest:
     @property
     def ui(self) -> list[dict[str, Any]]:
         return self.raw.get("ui", [])
+
+    def ui_layouts(self) -> dict[str, Any]:
+        """Top-level sections that ``ui`` items name with ``"layout":
+        "<section>"`` (e.g. a keyboard's key map, shared by the lighting
+        and game-mode widgets and read by the driver), sent to clients
+        along with ``ui`` so the data isn't repeated per widget."""
+        names: set[str] = set()
+
+        def walk(items: Any) -> None:
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict):
+                    if isinstance(ref := item.get("layout"), str):
+                        names.add(ref)
+                    walk(item.get("children"))
+
+        walk(self.ui)
+        return {n: self.raw[n] for n in sorted(names) if isinstance(self.raw.get(n), dict)}
 
     def best_rule(self, ident: DeviceIdentity) -> MatchRule | None:
         scored = [(r.score(ident), r) for r in self.match]

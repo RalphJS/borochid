@@ -95,6 +95,30 @@ opens only its own hidraw node, never the receiver's, which carries the
 traffic of every device paired to it (keyboards included). The receiver is
 reported too, as an ordinary USB device.
 
+## One device, several connections
+
+A device can reach the computer more than one way: a keyboard through its
+receiver, on its USB cable and over Bluetooth. A driver that can read the
+device's own ID from it (a unit ID, the same over every connection) calls
+`Driver.identify(id)`, and then:
+
+* **One set of settings.** They are kept under `id-<ID>` instead of the
+  USB serial or port, so they follow the device across connections and
+  ports. The first time, what the connection kept so far moves there;
+  after that the device's own settings win and the connection's file is
+  removed. Host services (`host.audio`) follow the same ID.
+* **One card.** Connections sharing an ID are one device: the one in use
+  (ready and available first, then cable over wireless over Bluetooth) is
+  shown and owns the settings; the others are `shadowed` in their summary,
+  hidden by the GUI, and `passive` (they don't save). One that takes over
+  reloads the settings its twin may have changed.
+* **Known ahead.** The service remembers which USB serial belongs to which
+  ID (`device-ids.json` in the data directory; serials only, never ports),
+  so a connection seen before is hidden from the moment it appears, not
+  after its driver has set up.
+
+Summaries carry `device_id`, `connection` and `shadowed`.
+
 ## Profiles
 
 Profiles ("Work", "Gaming") belong to the service and are shared by every
@@ -169,10 +193,11 @@ plugin). Key sections:
   `speaker`, `microphone`, `keyboard`, `keypad`, `mouse`, `gamepad`,
   `tablet`, `webcam`, `other`). The GUI shows the matching icon from the
   desktop's icon theme when the package has no picture. Unknown values read
-  as `other`.
+  as `other`. A `keyboard` gets a card two columns wide on the home grid,
+  with its picture kept at its own (wide) aspect ratio.
 * `image`: a picture of the device, e.g. `"images/virtuoso.png"`. A match
   rule can set its own `image` for models that look different. PNG only, at
-  most 384×384 and 256 KiB; `borochid-registry check` and `build` refuse
+  most 384 px on the short side, 768 px on the long one and 256 KiB; `borochid-registry check` and `build` refuse
   anything else. The service re-checks the picture and exports it to a
   content-addressed image store (`<cache>/images/<sha256>.png`); device
   summaries name the digest and the GUI reads the file from there, checking
@@ -184,18 +209,19 @@ plugin). Key sections:
   or `pid_range`, or BLE `service_uuid` / `company_id` (+ `name_prefix`).
   The most specific rule wins. A rule with `"channel": null` recognises a
   device mode that has nothing to talk to (a dongle whose headset is off):
-  the driver runs, but nothing is opened.
+  the driver runs, but nothing is opened. `"connection"` says how a device
+  matched by the rule is connected, `wireless` (receiver or dongle),
+  `cable` or `bluetooth` (implied for BLE), and the GUI shows it as an icon.
 * `channel`: `{"type": "hid", "interface": 1, "report_size": 32}`, `serial`
   (`baudrate`), `libusb` (`in_endpoint`/`out_endpoint`), `ble`
   (`notify`/`write` characteristic UUIDs).
 * `state`, `inputs`, `actions`, `init`: declarative protocol (struct formats,
   `$param` bindings). Documented in `packages/service/src/borochid/service/drivers/declarative.py`.
-* `battery`: `{"level": key, "charging": key, "refresh": action,
-  "refresh_if": key}`, which driver state holds the battery. The level is a
-  percentage; the GUI shows it the same way for every device (a battery icon
-  on the device's tile and next to its status, with a bolt while charging, and
-  a refresh button running `refresh` while `refresh_if` is truthy). Only
-  `level` is required.
+* `battery`: `{"level": key, "charging": key}`, which driver state holds the
+  battery. The level is a percentage; the GUI shows it the same way for every
+  device (a battery icon on the device's tile and next to its status, with a
+  bolt while charging). Drivers keep it current; there is no refresh button.
+  Only `level` is required.
 * `available`: when a plugged-in device can actually be used, as a state key
   (`"online"`, usable while truthy) or `{"state": "link", "values":
   ["online", "wired"]}`. While it isn't (a wireless headset switched off),
@@ -208,11 +234,16 @@ plugin). Key sections:
   shortcut recorder that works by physical key, with clickable modifiers
   for shortcuts the desktop keeps for itself; `packages/gui/src/borochid/gui/binding_editor.py`), `group` (a section; with two or more top-level groups the
   device page shows each as a section picked with an icon button: the
-  group's `icon`, with its `label` on hover)
+  group's `icon`, with its `label` on hover), `keyboard` (a drawing of the keys from a key map in the package, for
+  per-key lighting or for picking keys such as the ones game mode disables;
+  `packages/gui/src/borochid/gui/keyboard_widget.py`)
   and `row` (children side by side,
   each child's `label` shown just before it, e.g. a light's colour and
   brightness). Any widget can set `tooltip` and `enabled_if` (a state key; `"!key"`
-  enables it while the key is falsy).
+  enables it while the key is falsy). An item's `"layout": "<section>"`
+  names a top-level manifest section (e.g. `"keyboard": {"keys": [...]}`)
+  that the service sends along with `ui`, so widgets that share data (and
+  the driver) don't repeat it.
   `readout`, `slider` and `button` take an `icon`: a desktop theme icon name
   (`"view-refresh"`), or a list of names to cover different themes; a
   readout's icon can follow its value with `{"map": {value: name}}`. The

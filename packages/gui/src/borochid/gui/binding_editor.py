@@ -381,6 +381,7 @@ def _buttons(item, ctx):
 
         action.clicked.connect(open_editor)
         edit.clicked.connect(open_editor)
+        ctx.editors[(item.get("action"), bid)] = open_editor  # a keyboard key can open it too
         ctx.watch(b.get("state", f"bind.{bid}"), show)
         grid.addWidget(name, row, 0)
         grid.addWidget(action, row, 1)

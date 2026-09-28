@@ -143,6 +143,16 @@ class HostAudio:
         self._set(**{k: self.settings.get(k, default) for k, (_, default) in self.SETTINGS.items()})
         await self._resync()
         self._watcher = asyncio.create_task(self._watch())
+        await self._restore()
+
+    async def identify(self, device_id: str) -> None:
+        """Keep settings under the device's own ID; apply them if they differ."""
+        if self._store.rekey(device_id):
+            self.settings = self._store.load()
+            self._set(**{k: self.settings.get(k, default) for k, (_, default) in self.SETTINGS.items()})
+            await self._restore()
+
+    async def _restore(self) -> None:
         for key, apply in (("volume", self._apply_volume), ("sidetone", self._apply_sidetone)):
             if self.settings.get(key) is not None:
                 try:
