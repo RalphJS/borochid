@@ -71,6 +71,17 @@ def test_power_reads_the_battery_under_the_device(tmp_path):
     assert seen == [{"power.level": 63, "power.online": True}]  # only what changed
 
 
+def test_power_charging_counts_as_online(tmp_path):
+    # hid-logitech-hidpp: "online" is 0 while charging, status "Unknown" once the link is gone.
+    supply = make_supply(tmp_path, capacity="74", status="Charging", online="0")
+    p = HostPower(tmp_path, lambda _c: None, watch=never())
+    p.read()
+    assert p.state == {"power.level": 74, "power.charging": True, "power.online": True}
+    (supply / "status").write_text("Unknown\n")
+    p.read()
+    assert not p.state["power.online"] and not p.state["power.charging"]
+
+
 def test_power_without_a_supply_reports_nothing(tmp_path):
     p = HostPower(tmp_path, lambda _c: None, watch=never())
     p.read()

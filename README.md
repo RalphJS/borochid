@@ -254,6 +254,9 @@ plugin). Key sections:
   (`"online"`, usable while truthy) or `{"state": "link", "values":
   ["online", "wired"]}`. While it isn't (a wireless headset switched off),
   the GUI fades its picture, hides its battery and disables its settings.
+  A match rule may carry its own `battery` and `available` for the
+  connection it matches, e.g. a mouse whose battery the kernel reads
+  through its receiver but not on its cable.
 * `ui`: widget list: `readout` (optional `map`), `slider`, `spin`,
   `toggle`, `select`, `color` (a swatch plus a colour-picker button),
   `button`, `stages` (an editable list such as DPI stages: add, remove, pick the

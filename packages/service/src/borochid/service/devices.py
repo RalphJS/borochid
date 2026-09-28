@@ -152,13 +152,13 @@ class Device:
     def available(self) -> bool:
         """False while a ready device can't be used (manifest ``available``),
         e.g. a dongle whose headset is switched off."""
-        spec = self.manifest.available if self.manifest else None
+        spec = self.manifest.available_for(self.ident) if self.manifest else None
         return spec is None or self.status is not DeviceStatus.READY or spec(self.state())
 
     def battery(self) -> dict[str, Any] | None:
         """``{"level": 0-100 or None, "charging": bool}`` for packages with a
         ``battery`` section, else None."""
-        spec = self.manifest.battery if self.manifest else None
+        spec = self.manifest.battery_for(self.ident) if self.manifest else None
         if spec is None or self.status is not DeviceStatus.READY:
             return None
         state = self.state()
@@ -508,10 +508,7 @@ class DeviceManager:
         # State that the summary shows (status line, battery): clients
         # listing devices get a new summary when it changes.
         summary_keys = {(manifest.raw.get("summary") or {}).get("state")} - {None}
-        if manifest.battery:
-            summary_keys |= manifest.battery.keys
-        if manifest.available:
-            summary_keys.add(manifest.available.state)
+        summary_keys |= manifest.state_keys
 
         def publish(changes: dict[str, Any]) -> None:
             self.emit("device.state", {"uid": uid, "changes": changes})

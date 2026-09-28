@@ -74,3 +74,22 @@ def test_availability_section():
     for bad in (3, {"values": ["x"]}, {"state": "link", "values": []}, {"state": "link", "values": "online"}):
         with pytest.raises(ManifestError, match="available"):
             make(bad)
+
+
+def test_a_rule_overrides_battery_and_availability_for_its_connection():
+    m = Manifest.from_json({
+        **BASE,
+        "match": [
+            {"bus": "usb", "vid": 1, "pid": 2, "connection": "wireless"},
+            {"bus": "usb", "vid": 1, "pid": 3, "connection": "cable",
+             "battery": {"level": "bat", "charging": "chg"}, "available": {"state": "link", "values": ["online"]}},
+        ],
+        "battery": {"level": "power.level"},
+        "available": "power.online",
+    })
+    wireless, cable = DeviceIdentity(Bus.USB, "w", vid=1, pid=2), DeviceIdentity(Bus.USB, "c", vid=1, pid=3)
+    assert m.battery_for(wireless).level == "power.level" and m.available_for(wireless).state == "power.online"
+    assert m.battery_for(cable).level == "bat" and m.available_for(cable)({"link": "online"})
+    assert m.state_keys == {"power.level", "power.online", "bat", "chg", "link"}
+    with pytest.raises(ManifestError, match="battery"):
+        Manifest.from_json({**BASE, "match": [{"bus": "usb", "vid": 1, "battery": {}}]})
