@@ -177,3 +177,16 @@ def test_ui_layouts_are_the_sections_ui_items_name():
                 {"widget": "keyboard", "layout": "name"}, {"widget": "keyboard", "layout": "missing"},
                 {"widget": "keyboard", "layout": {"keys": []}}]}
     assert Manifest.from_json(d).ui_layouts() == {"keyboard": keys}
+
+
+def test_paired_rules_tell_a_dongle_from_the_device_behind_it():
+    dongle = DeviceIdentity(Bus.USB, "usb:1-2", vid=0x1B1C, pid=0x0A3E)
+    behind = DeviceIdentity(Bus.USB, "usb:1-2/headset", vid=0x1B1C, pid=0x0A3E, attrs={"receiver": "/sys/usb1/1-2"})
+    receiver_rule = MatchRule.from_json({"bus": "usb", "vid": "0x1b1c", "pid": "0x0a3e", "paired": False})
+    headset_rule = MatchRule.from_json({"bus": "usb", "vid": "0x1b1c", "pid": "0x0a3e", "paired": True})
+    either = MatchRule.from_json({"bus": "usb", "vid": "0x1b1c", "pid": "0x0a3e"})
+    assert receiver_rule.score(dongle) and not receiver_rule.score(behind)
+    assert headset_rule.score(behind) and not headset_rule.score(dongle)
+    assert headset_rule.score(behind) > either.score(behind)
+    with pytest.raises(ValueError, match="paired"):
+        MatchRule.from_json({"bus": "usb", "paired": "yes"})

@@ -8,6 +8,14 @@ Some devices re-enumerate to change mode (a wireless dongle becomes another
 product while its headset is off). A removal is therefore held for
 ``grace_s``: if the same device (same port, same serial) comes back in time,
 it continues as the same entry instead of being removed and re-added.
+
+A receiver's driver may announce the device behind it (``Driver.pair``):
+that device has no node of its own, talks through the receiver's channel,
+and goes when the receiver goes.
+
+The user can hide a device (a receiver they never need to see, say). Hidden
+devices stay in the list, flagged, so clients can offer to show them again;
+the choice is kept by the device's ID, else its USB serial, else its port.
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ from borochid.common import images
 from borochid.common.manifest import Manifest, display_name, state_key
 from borochid.common.models import Bus, DeviceIdentity, DeviceStatus
 from borochid.service import plugins
-from borochid.service.channels import Channel, ChannelNotReady, NullChannel
+from borochid.service.channels import Channel, ChannelNotReady, NullChannel, PairedChannel
 from borochid.service.drivers import Driver
 from borochid.service.drivers.loader import DriverUnavailable, driver_class
 from borochid.service.host import Host
@@ -70,9 +78,15 @@ class Device:
     # Another connection to the same device (same device ID) is the one in
     # use: clients hide this one (see DeviceManager._resolve_twins).
     shadowed: bool = False
+    # Behind a receiver, announced by the receiver's driver: its uid and the
+    # channel through it.
+    receiver: str | None = None
+    paired_channel: PairedChannel | None = field(default=None, repr=False)
+    # Hidden by the user (DeviceManager.set_hidden).
+    hidden: bool = False
 
     def connection(self) -> str | None:
-        """"wireless", "cable" or "bluetooth": from the matching package rule,
+        """"wireless", "cable", "usb" or "bluetooth": from the matching package rule,
         or the bus."""
         if self.ident.bus is Bus.BLE:
             return "bluetooth"
@@ -108,6 +122,7 @@ class Device:
             # sharing one are the same device.
             "device_id": self.device_id,
             "shadowed": self.shadowed,
+            "hidden": self.hidden,
             "error": self.error,
             "needs": self.needs,
             "package": pkg,
@@ -206,6 +221,8 @@ class DeviceManager:
         # hold another device next time.
         self._known_ids_path = self.data_dir / "device-ids.json"
         self._known_ids: dict[str, str] = self._load_known_ids()
+        self._hidden_path = self.data_dir / "hidden-devices.json"
+        self._hidden: set[str] = self._load_hidden()
 
     # -- DeviceSink ------------------------------------------------------------
 
@@ -224,18 +241,22 @@ class DeviceManager:
                 dev.ident = ident
                 dev.task = asyncio.create_task(self._bring_up(dev), name=f"bring-up {ident.uid}")
                 return
-        dev = Device(ident)
-        self.devices[ident.uid] = dev
         log.info("detected %s%s %s", ident.uid, ids, ident.name)
+        self._add(Device(ident))
+
+    def _add(self, dev: Device) -> None:
+        ident = dev.ident
+        self.devices[ident.uid] = dev
         if known := self._known_ids.get(self._serial_key(ident) or ""):
             dev.device_id = known
             self._resolve_twins(known)  # hidden from the start if another connection is in use
+        dev.hidden = self._is_hidden(dev)
         self.emit("device.added", dev.summary())
         dev.task = asyncio.create_task(self._bring_up(dev), name=f"bring-up {ident.uid}")
 
     def device_removed(self, uid: str) -> None:
         dev = self.devices.get(uid)
-        if dev is None or dev.removal is not None:
+        if dev is None or dev.removal is not None or dev.receiver is not None:
             return
         if dev.channel is not None and dev.channel.outlives_detection:
             return  # e.g. connected BLE peripheral that stopped advertising
@@ -256,12 +277,92 @@ class DeviceManager:
 
     def device_changed(self, uid: str) -> None:
         dev = self.devices.get(uid)
-        if dev is None or dev.status is DeviceStatus.READY or dev.removal is not None:
+        if dev is None or dev.status is DeviceStatus.READY or dev.removal is not None or dev.receiver is not None:
             return
         if dev.task and not dev.task.done():
             dev.changed_during_bring_up = True
         else:
             self.retry(uid, rescan=False)
+
+    # -- devices behind a receiver ----------------------------------------------
+
+    def _paired_added(self, receiver: Device, slot: str, name: str, pid: int | None, shared: Any) -> PairedChannel | None:
+        if receiver.channel is None or self.devices.get(receiver.ident.uid) is not receiver:
+            return None
+        uid = f"{receiver.ident.uid}/{slot}"
+        if uid in self.devices:
+            self._paired_removed(receiver, slot)
+        r = receiver.ident
+        # "receiver" as for the kernel's paired devices (udev detector), so
+        # "paired" match rules treat both alike.
+        ident = DeviceIdentity(r.bus, uid, vid=r.vid, pid=r.pid if pid is None else pid, name=name or r.name,
+                               attrs={"receiver": r.attrs.get("sys_path", r.uid)})
+        channel = PairedChannel(ident, receiver.channel, shared)
+        log.info("%s: %s paired", r.uid, uid)
+        self._add(Device(ident, receiver=r.uid, paired_channel=channel))
+        return channel
+
+    def _paired_removed(self, receiver: Device, slot: str) -> None:
+        dev = self.devices.get(f"{receiver.ident.uid}/{slot}")
+        if dev is None or dev.receiver != receiver.ident.uid:
+            return
+        dev.teardown = asyncio.get_running_loop().create_task(self._tear_down(dev))
+        self._forget(dev)
+
+    async def _remove_paired(self, receiver: Device) -> None:
+        """Before the receiver's own driver stops: a paired device's driver
+        may still need the receiver's channel to hand the device back."""
+        for dev in [d for d in self.devices.values() if d.receiver == receiver.ident.uid]:
+            self._paired_removed(receiver, dev.ident.uid.rsplit("/", 1)[1])
+            if dev.teardown is not None:
+                await dev.teardown
+
+    # -- hidden devices ----------------------------------------------------------
+
+    def _load_hidden(self) -> set[str]:
+        try:
+            raw = json.loads(self._hidden_path.read_text())
+        except (OSError, ValueError):
+            return set()
+        return {k for k in raw if isinstance(k, str)} if isinstance(raw, list) else set()
+
+    @staticmethod
+    def _hide_keys(dev: Device) -> list[str]:
+        """Most lasting first: the device's own ID follows it everywhere; a
+        USB serial survives a re-enumeration as another product; a port is
+        all there is otherwise."""
+        ident, keys = dev.ident, []
+        if dev.device_id:
+            keys.append(f"id:{dev.device_id}")
+        if ident.serial and ident.vid is not None:
+            keys.append(f"{ident.bus}:{ident.vid:04x}:{ident.serial}")
+        keys.append(f"uid:{ident.uid}")
+        return keys
+
+    def _is_hidden(self, dev: Device) -> bool:
+        return any(k in self._hidden for k in self._hide_keys(dev))
+
+    def set_hidden(self, uid: str, hidden: bool) -> Device:
+        dev = self.devices[uid]
+        keys = self._hide_keys(dev)
+        if hidden:
+            self._hidden.add(keys[0])
+        else:
+            self._hidden.difference_update(keys)
+        try:
+            self._hidden_path.parent.mkdir(parents=True, exist_ok=True)
+            self._hidden_path.write_text(json.dumps(sorted(self._hidden), indent=1))
+        except OSError as e:
+            log.warning("can't remember hidden devices: %s", e)
+        self._refresh_hidden()
+        return dev
+
+    def _refresh_hidden(self) -> None:
+        # Every connection of a device hidden by its ID follows.
+        for d in self.devices.values():
+            if d.hidden != (hidden := self._is_hidden(d)):
+                d.hidden = hidden
+                self.emit("device.changed", d.summary())
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -297,10 +398,12 @@ class DeviceManager:
                 self._known_ids_path.write_text(json.dumps(self._known_ids, indent=1, sort_keys=True))
             except OSError as e:
                 log.warning("can't remember device IDs: %s", e)
+        dev.hidden = self._is_hidden(dev)
         self.emit("device.changed", dev.summary())
         self._resolve_twins(device_id)
+        self._refresh_hidden()
 
-    _PREFERRED = {"cable": 0, "wireless": 1, "bluetooth": 2}
+    _PREFERRED = {"cable": 0, "usb": 0, "wireless": 1, "bluetooth": 2}
 
     def _resolve_twins(self, device_id: str) -> None:
         """Connections to one device (receiver and cable, say): the one in
@@ -377,8 +480,10 @@ class DeviceManager:
         # should not open (or disturb) the hardware.
         cls = driver_class(manifest.driver)
 
-        if not self._matching_rule_has_channel(manifest, ident):
-            channel: Channel = NullChannel(ident, {})
+        if dev.paired_channel is not None:
+            channel: Channel = dev.paired_channel
+        elif not self._matching_rule_has_channel(manifest, ident):
+            channel = NullChannel(ident, {})
         elif ident.attrs.get("simulated"):
             from borochid.service.channels.sim import SimChannel
 
@@ -416,6 +521,8 @@ class DeviceManager:
         )
         driver = cls(manifest, dev.package_dir, channel, publish, SettingsStore(self.data_dir, manifest.id, ident), host)
         driver.on_identify = lambda device_id: self._identified(dev, device_id)
+        driver.on_pair = lambda slot, name, pid, shared: self._paired_added(dev, slot, name, pid, shared)
+        driver.on_unpair = lambda slot: self._paired_removed(dev, slot)
         driver.passive = dev.shadowed  # known ahead to be a second connection: not the settings' owner yet
         channel.on_data = driver.on_data
         channel.on_closed = lambda exc: self._on_channel_closed(dev, exc)
@@ -459,6 +566,7 @@ class DeviceManager:
         self._set(dev, DeviceStatus.DISCONNECTED, "device disconnected")
 
     async def _close_io(self, dev: Device) -> None:
+        await self._remove_paired(dev)
         driver, host, channel = dev.driver, dev.host, dev.channel
         dev.driver = dev.host = dev.channel = None
         # Driver first: it may still need the channel to hand the device back
@@ -535,5 +643,6 @@ class DeviceManager:
         for d in self.devices.values():
             if d.removal is not None:
                 d.removal.cancel()
-        await asyncio.gather(*(self._tear_down(d) for d in self.devices.values()))
+        # Paired devices go with their receivers, first.
+        await asyncio.gather(*(self._tear_down(d) for d in list(self.devices.values()) if d.receiver is None))
         self.devices.clear()

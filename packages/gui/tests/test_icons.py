@@ -28,3 +28,11 @@ def test_battery_text():
     assert battery_text(None) == ""
     assert battery_text({"level": None}) == "—"
     assert battery_text({"level": 80, "charging": True}) == "80%, charging"
+
+
+def test_connection_words():
+    from borochid.gui.icons import connection_text
+
+    assert connection_text("cable") == "Connected by usb cable"
+    assert connection_text("usb") == "USB"  # a dongle, plugged straight in
+    assert connection_text("wireless") == "Wireless" and connection_text("nonsense") == ""

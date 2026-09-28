@@ -489,3 +489,108 @@ def test_a_known_serial_is_the_same_device_from_the_moment_it_appears(tmp_path, 
         assert again._known_ids == {"usb:1209:b0c1:SN42": "unit-7"}
 
     asyncio.run(go())
+
+
+def _dongle_and_headset_packages(root, examples):
+    """Two packages for one USB ID: the dongle, and the headset behind it."""
+    import shutil
+
+    for pkg_id, paired in (("acme.dongle", False), ("acme.headset", True)):
+        shutil.copytree(examples / "acme.macropad", root / pkg_id)
+        path = root / pkg_id / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["id"] = pkg_id
+        manifest["match"][0]["paired"] = paired
+        path.write_text(json.dumps(manifest))
+    return root
+
+
+def test_a_device_a_receiver_driver_announces_is_its_own_device_and_goes_with_it(tmp_path, examples):
+    from borochid.common.models import Bus, DeviceIdentity
+    from borochid.service.channels import PairedChannel
+
+    pkgs = _dongle_and_headset_packages(tmp_path / "pkgs", examples)
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=pkgs, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+        manager.device_added(DeviceIdentity(Bus.USB, "usb:1-2", vid=0x1209, pid=0xB0C1, name="Acme Dongle",
+                                            attrs={"simulated": True, "sys_path": "/sys/usb1/1-2"}))
+        dongle = manager.devices["usb:1-2"]
+        await dongle.task
+        assert dongle.manifest.id == "acme.dongle"
+
+        channel = dongle.driver.pair("headset", name="Acme Headset")
+        headset = manager.devices["usb:1-2/headset"]
+        await headset.task
+        assert str(headset.status) == "ready" and headset.manifest.id == "acme.headset"
+        assert headset.summary()["display_name"] == "Acme Headset"
+        assert isinstance(headset.channel, PairedChannel) and headset.channel is channel
+        assert channel.receiver is dongle.channel
+
+        written = []
+        dongle.channel.write = lambda data: written.append(data) or asyncio.sleep(0)
+        await manager.invoke("usb:1-2/headset", "set_brightness", {"value": 9})
+        assert written == [bytes([3, 9])]  # through the dongle's channel
+        channel.deliver(bytes.fromhex("0340"))  # the dongle's driver hands it its input
+        assert headset.driver.state["brightness"] == 0x40
+
+        manager.device_removed("usb:1-2/headset")  # udev knows nothing of it: ignored
+        assert "usb:1-2/headset" in manager.devices
+        dongle.driver.unpair("headset")
+        assert "usb:1-2/headset" not in manager.devices
+        await asyncio.sleep(0.01)
+
+        dongle.driver.pair("headset")
+        again = manager.devices["usb:1-2/headset"]
+        await again.task
+        manager.device_removed("usb:1-2")  # the dongle is unplugged: the headset goes at once
+        await dongle.teardown
+        assert "usb:1-2/headset" not in manager.devices and again.driver is None
+        assert ("device.removed", {"uid": "usb:1-2/headset"}) in events
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_hidden_devices_stay_listed_flagged_and_are_remembered(tmp_path, examples):
+    from borochid.common.models import Bus, DeviceIdentity
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=examples, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+
+        def plug(m, uid, serial=None, pid=0xB0C1):
+            m.device_added(DeviceIdentity(Bus.USB, uid, vid=0x1209, pid=pid, serial=serial, attrs={"simulated": True}))
+            return m.devices[uid]
+
+        dongle = plug(manager, "usb:1-2", serial="R1")
+        other = plug(manager, "usb:1-5")
+        await dongle.task
+        await other.task
+        assert manager.set_hidden("usb:1-2", True).summary()["hidden"] is True
+        assert [p["hidden"] for m, p in events if m == "device.changed" and p["uid"] == "usb:1-2"][-1] is True
+        assert other.hidden is False
+        await manager.shutdown()
+
+        # Remembered, and by its USB serial: the same dongle as another product
+        # (re-enumerated) or on another port is still hidden.
+        again = DeviceManager(Registry(cfg), lambda m, p: None)
+        assert plug(again, "usb:3-1", serial="R1", pid=0xB0C2).hidden is True
+        assert plug(again, "usb:1-5").hidden is False
+
+        # A device with an ID: every connection of it is hidden.
+        cable, radio = plug(again, "usb:1-7"), plug(again, "usb:1-8")
+        await cable.task
+        await radio.task
+        await cable.driver.identify("unit-7")
+        await radio.driver.identify("unit-7")
+        again.set_hidden("usb:1-7", True)
+        assert cable.hidden and radio.hidden
+        again.set_hidden("usb:1-8", False)  # shown again from either one
+        assert not cable.hidden and not radio.hidden
+        await again.shutdown()
+
+    asyncio.run(go())

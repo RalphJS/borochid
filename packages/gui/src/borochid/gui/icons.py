@@ -29,6 +29,7 @@ _CATEGORY_ICONS = {
     "gamepad": ("input-gaming",),
     "tablet": ("input-tablet",),
     "webcam": ("camera-web", "camera-video"),
+    "receiver": ("drive-removable-media-usb", "network-wireless"),
 }
 _BUS_ICONS = {"ble": ("bluetooth", "preferences-system-bluetooth"), "usb": ("drive-removable-media-usb",)}
 
@@ -43,6 +44,7 @@ INACTIVE = frozenset({"detected", "resolving", "connecting", "disconnected", "un
 CONNECTIONS = {
     "wireless": (("network-wireless-symbolic", "network-wireless"), "Wireless"),
     "cable": (("drive-removable-media-usb-symbolic", "drive-removable-media-usb", "network-wired-symbolic"), "USB cable"),
+    "usb": (("drive-removable-media-usb-symbolic", "drive-removable-media-usb"), "USB"),
     "bluetooth": (("preferences-system-bluetooth", "bluetooth-active-symbolic", "bluetooth"), "Bluetooth"),
 }
 

@@ -65,7 +65,7 @@ class DeviceIdentity:
         }
 
 
-CONNECTIONS = ("wireless", "cable", "bluetooth")
+CONNECTIONS = ("wireless", "cable", "usb", "bluetooth")
 
 
 def parse_int(value: int | str) -> int:
@@ -87,9 +87,15 @@ class MatchRule:
     channel: bool = True
     # Picture for the models this rule matches, overriding the package's.
     image: str | None = None
-    # How a device matched by this rule is connected: "wireless" (a
-    # receiver or dongle), "cable" or "bluetooth". Shown as an icon.
+    # How a device matched by this rule is connected: "wireless" (through a
+    # receiver or dongle), "cable", "usb" (plugged straight in, like the
+    # dongle itself) or "bluetooth". Shown as an icon.
     connection: str | None = None
+    # True: only a device reached through a receiver (the kernel's paired
+    # device, or one a receiver's driver announces); False: only the
+    # receiver or a device on its own. Tells a dongle from the headset
+    # behind it when both report the dongle's IDs.
+    paired: bool | None = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> MatchRule:
@@ -97,6 +103,9 @@ class MatchRule:
         connection = d.get("connection")
         if connection is not None and connection not in CONNECTIONS:
             raise ValueError(f"connection must be one of {', '.join(CONNECTIONS)}")
+        paired = d.get("paired")
+        if paired is not None and not isinstance(paired, bool):
+            raise ValueError("paired must be true or false")
         return cls(
             bus=Bus(d["bus"]),
             vid=parse_int(d["vid"]) if "vid" in d else None,
@@ -108,6 +117,7 @@ class MatchRule:
             channel=d.get("channel", True) is not None,
             image=d.get("image"),
             connection=connection,
+            paired=paired,
         )
 
     def score(self, ident: DeviceIdentity) -> int:
@@ -139,4 +149,8 @@ class MatchRule:
             if not ident.name.startswith(self.name_prefix):
                 return 0
             score += 2
+        if self.paired is not None:
+            if self.paired != bool(ident.attrs.get("receiver")):
+                return 0
+            score += 1
         return score

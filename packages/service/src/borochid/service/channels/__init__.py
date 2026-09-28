@@ -70,6 +70,35 @@ class NullChannel(Channel):
         pass
 
 
+class PairedChannel(Channel):
+    """A device behind a receiver that the kernel doesn't split out (a
+    headset on its dongle, say), announced by the receiver's driver
+    (``Driver.pair``). Writes go through the receiver's channel, and the
+    receiver's driver hands over this device's input with ``deliver()``.
+    Opening and closing touch nothing: the receiver owns the node.
+
+    ``shared`` is whatever the receiver's driver passes along for the paired
+    device's driver (both come from the same plugin), e.g. the request/reply
+    session both must use so their replies don't cross."""
+
+    def __init__(self, ident: DeviceIdentity, receiver: Channel, shared: Any = None):
+        super().__init__(ident, {})
+        self.receiver = receiver
+        self.shared = shared
+
+    async def open(self) -> None:
+        pass
+
+    async def write(self, data: bytes) -> None:
+        await self.receiver.write(data)
+
+    async def close(self) -> None:
+        pass
+
+    def deliver(self, data: bytes) -> None:
+        self._deliver(data)
+
+
 def find_usb_child(ident: DeviceIdentity, subsystem: str, interface: int | list[int] | None):
     """Locate a device node (hidraw, tty, ...) belonging to a USB device.
 
