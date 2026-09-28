@@ -73,7 +73,7 @@ class Device:
     removal: asyncio.TimerHandle | None = field(default=None, repr=False)
     teardown: asyncio.Task | None = field(default=None, repr=False)
     # The device's own ID: from its driver (Driver.identify), or known ahead
-    # from an earlier connection with the same USB serial.
+    # from an earlier connection with the same USB serial or Bluetooth address.
     device_id: str | None = None
     # Another connection to the same device (same device ID) is the one in
     # use: clients hide this one (see DeviceManager._resolve_twins).
@@ -215,10 +215,10 @@ class DeviceManager:
         self.devices: dict[str, Device] = {}
         self.profiles = ProfileStore(self.data_dir / "profiles.json", self._profiles_changed)
         self._profile_task: asyncio.Task | None = None
-        # USB serial -> device ID, learned when a connection with that serial
-        # identifies, so it is known the moment that connection appears again
-        # (no second card while its driver sets up). Serials only: a port may
-        # hold another device next time.
+        # USB serial (or Bluetooth address) -> device ID, learned when a
+        # connection with that serial identifies, so it is known the moment
+        # that connection appears again (no second card while its driver sets
+        # up). Serials only: a port may hold another device next time.
         self._known_ids_path = self.data_dir / "device-ids.json"
         self._known_ids: dict[str, str] = self._load_known_ids()
         self._hidden_path = self.data_dir / "hidden-devices.json"
@@ -378,6 +378,12 @@ class DeviceManager:
 
     @staticmethod
     def _serial_key(ident: DeviceIdentity) -> str | None:
+        if ident.bus is Bus.BLE:
+            # No serial, but the address BlueZ keeps the pairing under: a
+            # paired keyboard in use on its receiver is reported at start,
+            # disconnected, and must not show as a second device.
+            address = ident.attrs.get("address")
+            return f"ble:{str(address).upper()}" if address else None
         if not ident.serial or ident.vid is None or ident.pid is None:
             return None
         return f"{ident.bus}:{ident.vid:04x}:{ident.pid:04x}:{ident.serial}"

@@ -491,6 +491,54 @@ def test_a_known_serial_is_the_same_device_from_the_moment_it_appears(tmp_path, 
     asyncio.run(go())
 
 
+def test_a_paired_bluetooth_connection_is_known_by_its_address(tmp_path, examples):
+    import shutil
+
+    from borochid.common.models import Bus, DeviceIdentity
+
+    pkgs = tmp_path / "pkgs"
+    shutil.copytree(examples / "acme.macropad", pkgs / "acme.macropad")
+    path = pkgs / "acme.macropad" / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["match"] = [{**manifest["match"][0], "connection": "wireless"}, {"bus": "ble", "name_prefix": "Acme"}]
+    path.write_text(json.dumps(manifest))
+
+    async def go():
+        events = []
+        cfg = Config(local_packages_dir=pkgs, cache_dir=tmp_path / "c", data_dir=tmp_path / "d")
+        manager = DeviceManager(Registry(cfg), lambda m, p: events.append((m, p)))
+
+        def bluetooth():
+            manager.device_added(DeviceIdentity(Bus.BLE, "ble:EF:24:28:5F:95:8A", name="Acme Pad",
+                                                attrs={"address": "EF:24:28:5F:95:8A", "simulated": True}))
+            return manager.devices["ble:EF:24:28:5F:95:8A"]
+
+        bt = bluetooth()
+        await bt.task
+        await bt.driver.identify("unit-7")
+        manager.device_removed(bt.ident.uid)
+        manager._forget(bt)
+
+        receiver = DeviceIdentity(Bus.USB, "usb:1", vid=0x1209, pid=0xB0C1, attrs={"simulated": True})
+        manager.device_added(receiver)
+        wireless = manager.devices["usb:1"]
+        await wireless.task
+        await wireless.driver.identify("unit-7")
+
+        events.clear()
+        bt = bluetooth()  # paired, reported at start while the receiver is in use
+        added = [p for m, p in events if m == "device.added"]
+        assert added[-1]["device_id"] == "unit-7" and added[-1]["shadowed"] is True
+        await bt.task
+        assert (wireless.shadowed, bt.shadowed) == (False, True)
+        await manager.shutdown()
+
+        again = DeviceManager(Registry(cfg), lambda m, p: None)
+        assert again._known_ids == {"ble:EF:24:28:5F:95:8A": "unit-7"}
+
+    asyncio.run(go())
+
+
 def _dongle_and_headset_packages(root, examples):
     """Two packages for one USB ID: the dongle, and the headset behind it."""
     import shutil
